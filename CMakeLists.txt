@@ -1,5 +1,5 @@
 #
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 project(ucan-monitor VERSION 1.0 LANGUAGES C CXX)
 
@@ -126,9 +126,26 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Install: bin/ next to assets/, the layout upstream expects. The program
 # loads its fonts from ../assets relative to the working directory, which is
 # bin/ when it is started from Explorer.
-install(TARGETS ${executable}
-    RUNTIME DESTINATION bin
-)
+if(WIN32)
+    # Ship the DLLs the program imports from the toolchain (GLFW, the GCC
+    # runtime, libatomic), found by reading the executable's import table.
+    # Installing fails if one cannot be found.
+    get_filename_component(toolchain_bin_dir ${CMAKE_CXX_COMPILER} DIRECTORY)
+    install(TARGETS ${executable}
+        RUNTIME_DEPENDENCY_SET runtime_dlls
+        RUNTIME DESTINATION bin
+    )
+    install(RUNTIME_DEPENDENCY_SET runtime_dlls
+        RUNTIME DESTINATION bin
+        DIRECTORIES ${toolchain_bin_dir}
+        PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+        POST_EXCLUDE_REGEXES "[Ss][Yy][Ss][Tt][Ee][Mm]32/"
+    )
+else()
+    install(TARGETS ${executable}
+        RUNTIME DESTINATION bin
+    )
+endif()
 install(DIRECTORY ${upstream_dir}/assets/
     DESTINATION assets
 )

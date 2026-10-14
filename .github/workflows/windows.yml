@@ -84,15 +84,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build -- -k 0
           cmake --install build --prefix dist/ucan-monitor
-
-      - name: Collect DLLs
-        if: steps.upstream.outputs.build == 'true'
-        shell: msys2 {0}
-        run: |
-          # the MinGW runtime and GLFW DLLs the program loads from /ucrt64/bin
-          ldd dist/ucan-monitor/bin/ucan-monitor.exe \
-            | awk '$3 ~ /^\/ucrt64\// { print $3 }' \
-            | xargs -r cp -v -t dist/ucan-monitor/bin
+          ls dist/ucan-monitor/bin
 
       - uses: actions/upload-artifact@v7
         if: steps.upstream.outputs.build == 'true'
