@@ -16,9 +16,10 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Windows 11 based: it opens upstream's util/aux.h as a plain file
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check out upstream
         id: upstream
@@ -26,6 +27,9 @@ jobs:
         run: |
           # upstream's own submodules (imgui, implot, ...) have SSH URLs; the runner has no key
           git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # upstream has src/ucanopen_servers/atvvcu/util/aux.h; Git for Windows
+          # refuses AUX, a DOS device name, unless this check is off
+          git config --global core.protectNTFS false
           git submodule update --init upstream
           old=$(git -C upstream rev-parse HEAD)
 
@@ -82,7 +86,7 @@ jobs:
             | awk '$3 ~ /^\/ucrt64\// { print $3 }' \
             | xargs -r cp -v -t dist/ucan-monitor/bin
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.upstream.outputs.build == 'true'
         with:
           name: ucan-monitor-win-${{ steps.upstream.outputs.sha }}
