@@ -1,0 +1,104 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *' # 06:00 Moscow time
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-${{ github.ref }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out upstream
+        id: upstream
+        shell: bash
+        run: |
+          # upstream's own submodules (imgui, implot, ...) have SSH URLs; the runner has no key
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init upstream
+          old=$(git -C upstream rev-parse HEAD)
+
+          # nightly and manual runs follow upstream develop; pushes build the recorded commit
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            git submodule update --remote upstream
+          fi
+          git -C upstream submodule update --init --recursive
+
+          new=$(git -C upstream rev-parse HEAD)
+          echo "sha=${new:0:7}" >> "$GITHUB_OUTPUT"
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          if [ "$old" = "$new" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git -C upstream log --oneline "$old..$new"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$old" = "$new" ]; then
+            echo "Upstream has not changed, nothing to build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: msys2/setup-msys2@v2
+        if: steps.upstream.outputs.build == 'true'
+        with:
+          msystem: UCRT64
+          update: true
+          install: git
+          pacboy: >-
+            gcc:p
+            cmake:p
+            ninja:p
+            glfw:p
+
+      - name: Build
+        if: steps.upstream.outputs.build == 'true'
+        shell: msys2 {0}
+        run: |
+          git config --global --add safe.directory '*'
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          cmake --install build --prefix dist/ucan-monitor
+
+      - name: Collect DLLs
+        if: steps.upstream.outputs.build == 'true'
+        shell: msys2 {0}
+        run: |
+          # the MinGW runtime and GLFW DLLs the program loads from /ucrt64/bin
+          ldd dist/ucan-monitor/bin/ucan-monitor.exe \
+            | awk '$3 ~ /^\/ucrt64\// { print $3 }' \
+            | xargs -r cp -v -t dist/ucan-monitor/bin
+
+      - uses: actions/upload-artifact@v4
+        if: steps.upstream.outputs.build == 'true'
+        with:
+          name: ucan-monitor-win-${{ steps.upstream.outputs.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Record the upstream commit
+        if: steps.upstream.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upstream
+          git commit -q -F - <<EOF
+          update upstream to ${{ steps.upstream.outputs.sha }}
+
+          $(git -C upstream log --oneline "${{ steps.upstream.outputs.old }}..HEAD")
+          EOF
+          git push
