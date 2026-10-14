@@ -71,6 +71,7 @@ jobs:
           install: git
           pacboy: >-
             gcc:p
+            libatomic:p
             cmake:p
             ninja:p
             glfw:p

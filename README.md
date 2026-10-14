@@ -85,7 +85,7 @@ git submodule update --init --recursive
 **Windows**, в оболочке MSYS2 UCRT64:
 
 ```bash
-pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,glfw,boost}
+pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,libatomic,cmake,ninja,glfw,boost}
 sh win/patches/apply.sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
