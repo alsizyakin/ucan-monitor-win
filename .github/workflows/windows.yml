@@ -30,6 +30,8 @@ jobs:
           # upstream has src/ucanopen_servers/atvvcu/util/aux.h; Git for Windows
           # refuses AUX, a DOS device name, unless this check is off
           git config --global core.protectNTFS false
+          # keep upstream sources byte for byte as in the repository, so the patches apply
+          git config --global core.autocrlf false
           git submodule update --init upstream
           old=$(git -C upstream rev-parse HEAD)
 
@@ -56,6 +58,11 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Apply Windows patches
+        if: steps.upstream.outputs.build == 'true'
+        shell: bash
+        run: sh win/patches/apply.sh
+
       - uses: msys2/setup-msys2@v2
         if: steps.upstream.outputs.build == 'true'
         with:
@@ -67,6 +74,7 @@ jobs:
             cmake:p
             ninja:p
             glfw:p
+            boost:p
 
       - name: Build
         if: steps.upstream.outputs.build == 'true'
@@ -74,7 +82,7 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
+          cmake --build build -- -k 0
           cmake --install build --prefix dist/ucan-monitor
 
       - name: Collect DLLs

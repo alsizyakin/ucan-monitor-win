@@ -1,0 +1,29 @@
+reference_manager: convert paths to std::string explicitly
+
+On Windows std::filesystem::path holds wchar_t and has no implicit
+conversion to std::string, so neither CSVReader(file) nor
+_label = file.stem() compiles there. On Linux the result is the same.
+
+diff --git a/src/reference_manager/reference_manager.cpp b/src/reference_manager/reference_manager.cpp
+index 4aa6d0f..dc20816 100644
+--- a/src/reference_manager/reference_manager.cpp
++++ b/src/reference_manager/reference_manager.cpp
+@@ -13,7 +13,7 @@ bool ReferenceManager::read_file(const std::filesystem::path& file) {
+     reset();
+ 
+     try {
+-        io::CSVReader<2> source(file);
++        io::CSVReader<2> source(file.string());
+         source.read_header(io::ignore_extra_column, "duration[ms]", _ref_unit);
+         uint64_t duration;
+         float reference;
+@@ -27,7 +27,7 @@ bool ReferenceManager::read_file(const std::filesystem::path& file) {
+         return false;
+     }
+ 
+-    _label = file.stem();
++    _label = file.stem().string();
+ 
+     return true;
+ }
+\ No newline at end of file
