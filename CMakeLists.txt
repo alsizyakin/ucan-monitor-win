@@ -135,11 +135,12 @@ if(WIN32)
         RUNTIME_DEPENDENCY_SET runtime_dlls
         RUNTIME DESTINATION bin
     )
+    # The search options must come before RUNTIME DESTINATION
     install(RUNTIME_DEPENDENCY_SET runtime_dlls
-        RUNTIME DESTINATION bin
-        DIRECTORIES ${toolchain_bin_dir}
         PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
         POST_EXCLUDE_REGEXES "[Ss][Yy][Ss][Tt][Ee][Mm]32/"
+        DIRECTORIES ${toolchain_bin_dir}
+        RUNTIME DESTINATION bin
     )
 else()
     install(TARGETS ${executable}
