@@ -135,9 +135,27 @@ target_link_libraries(${executable} PRIVATE
 if(WIN32)
     enable_language(RC)
 
+    # The icon: upstream's PNG wrapped into an .ico at build time
+    add_executable(png2ico ${PROJECT_SOURCE_DIR}/win/tools/png2ico.cpp)
+    target_link_libraries(png2ico PRIVATE common_options)
+    set(icon_png ${upstream_dir}/icons/hicolor/48x48/apps/ucan-monitor.png)
+    set(icon_file ${CMAKE_BINARY_DIR}/ucan-monitor.ico)
+    add_custom_command(OUTPUT ${icon_file}
+        COMMAND png2ico ${icon_png} ${icon_file}
+        DEPENDS png2ico ${icon_png}
+        COMMENT "Making the program icon"
+    )
+
     # Manifest: UTF-8 as the process code page, so that the UTF-8 paths ImGui
     # and the file dialog produce open correctly with Cyrillic in them.
-    target_sources(${executable} PRIVATE ${PROJECT_SOURCE_DIR}/win/res/ucan-monitor.rc)
+    set(manifest_file ${PROJECT_SOURCE_DIR}/win/res/ucan-monitor.manifest)
+
+    set(rc_file ${CMAKE_BINARY_DIR}/ucan-monitor.rc)
+    configure_file(${PROJECT_SOURCE_DIR}/win/res/ucan-monitor.rc.in ${rc_file} @ONLY)
+    set_source_files_properties(${rc_file} PROPERTIES
+        OBJECT_DEPENDS "${icon_file};${manifest_file}"
+    )
+    target_sources(${executable} PRIVATE ${rc_file})
 
     # A GUI program: no console window next to it. The log still goes to log.txt.
     set_target_properties(${executable} PROPERTIES WIN32_EXECUTABLE TRUE)

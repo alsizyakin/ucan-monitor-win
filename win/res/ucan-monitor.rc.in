@@ -1,0 +1,9 @@
+// Configured by CMake into the build tree, with absolute paths.
+
+// The program icon, made from upstream's PNG. GLFW gives its windows the icon
+// named GLFW_ICON; Explorer and the taskbar show the first icon in the file,
+// which is this one as well.
+GLFW_ICON ICON "@icon_file@"
+
+// 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST
+1 24 "@manifest_file@"
