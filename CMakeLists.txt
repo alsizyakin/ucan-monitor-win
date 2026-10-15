@@ -9,6 +9,15 @@ if(NOT EXISTS ${upstream_dir}/include/imgui/imgui.h)
 endif()
 
 ################################################################################
+# Build tree laid out as upstream's: programs in bin/ next to assets/
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(WIN32)
+    file(COPY ${upstream_dir}/assets DESTINATION ${CMAKE_BINARY_DIR})
+else()
+    file(CREATE_LINK ${upstream_dir}/assets ${CMAKE_BINARY_DIR}/assets SYMBOLIC)
+endif()
+
+################################################################################
 # Options all targets share
 add_library(common_options INTERFACE)
 
@@ -94,6 +103,7 @@ set(executable ${CMAKE_PROJECT_NAME})
 
 add_executable(${executable}
     ${app_sources}
+    ${PROJECT_SOURCE_DIR}/win/src/app/working_directory.cpp
     ${imgui_sources}
     ${imgui_backend_sources}
 )

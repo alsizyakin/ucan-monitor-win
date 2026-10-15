@@ -22,6 +22,7 @@
 | `win/tools/candle-test.cpp` | утилита проверки адаптера без графического интерфейса |
 | `win/tests/` | тесты |
 | `win/res/` | манифест Windows: UTF-8 для путей с кириллицей |
+| `win/src/app/` | рабочая папка программы — папка её exe, откуда бы её ни запустили |
 | `win/checkout-upstream.sh` | загрузка `upstream/` без файлов, которые Windows не может хранить |
 | `win/patches/` | мелкие исправления кода разработчика для Windows, см. ниже |
 | `CMakeLists.txt` | собирает `upstream/src` без `upstream/src/cansocket/`, плюс `win/` |
@@ -78,7 +79,11 @@ LTSC 2019) программа работает, но сохранение фай
 
 Распаковать архив и запустить `ucan-monitor\bin\ucan-monitor.exe`. Рядом
 с программой должны оставаться папки `bin\` и `assets\`: шрифты загружаются
-из `..\assets`. Журнал пишется в `bin\log.txt`.
+из `..\assets`. Запускать можно откуда угодно (ярлык, командная строка):
+программа сама переходит в свою папку `bin\`, туда же пишет журнал `log.txt`,
+раскладку окон `imgui.ini` и последнее подключение `cansocket.cfg`.
+
+Пошаговая проверка на Windows с адаптером: [docs/windows-check.md](docs/windows-check.md).
 
 ## Адаптер candleLight
 
@@ -139,7 +144,9 @@ cmake --install build --prefix dist/ucan-monitor
 ```
 
 **Linux** — теми же командами (Boost и GLFW — как в README разработчика,
-плюс `libusb-1.0-0-dev`).
+плюс `libusb-1.0-0-dev`). Программа собирается в `build/bin/`, рядом
+`build/assets` — ссылка на шрифты разработчика, так что `build/bin/ucan-monitor`
+можно запускать сразу, без установки.
 Linux-сборка этого репозитория использует тот же код работы с адаптером, что
 и Windows (не SocketCAN), поэтому на ней удобно отлаживать работу
 с candleLight.
