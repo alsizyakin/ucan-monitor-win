@@ -8,7 +8,9 @@
 #include <format>
 
 #ifdef _WIN32
+#ifndef NOMINMAX // MinGW's libstdc++ may have it already
 #define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <timeapi.h>
