@@ -102,7 +102,11 @@ std::string describe_error(const can_frame& frame) {
     if (text.empty()) {
         text = "error";
     }
-    return text + std::format(" (tx errors {}, rx errors {})", frame.data[6], frame.data[7]);
+    // the error counters, when the firmware fills them in
+    if (classes & 0x200) {
+        text += std::format(" (tx errors {}, rx errors {})", frame.data[6], frame.data[7]);
+    }
+    return text;
 }
 
 void print_frame(const char* direction, double seconds, const can_frame& frame) {
