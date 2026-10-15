@@ -119,10 +119,11 @@ jobs:
           git push
 
       - name: Publish the release
-        # a new upstream commit, or a change here pushed to main
+        # a new upstream commit, a change here pushed to main, or a run by hand
         if: >-
           steps.upstream.outputs.build == 'true' && github.ref == 'refs/heads/main' &&
-          (github.event_name == 'push' || steps.upstream.outputs.changed == 'true')
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+           steps.upstream.outputs.changed == 'true')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
