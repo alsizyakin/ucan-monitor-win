@@ -2,23 +2,31 @@
 //
 //   candle-test -l                  list the adapters on USB
 //   candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]
-//               [-s 123#1122334455667788]
+//               [-s 123#1122334455667788 [-p 1000] [-c]]
 //
 // Opens the adapter, prints the frames and the bus errors received for -t
-// seconds (0: until Ctrl+C) and, with -s, sends a frame once a second: the id
-// in hex (over 7FF it goes as extended), then up to 8 data bytes in hex.
+// seconds (0: until Ctrl+C) and, with -s, sends a frame every -p ms (1000 by
+// default): the id in hex (over 7FF it goes as extended), then up to 8 data
+// bytes in hex. Below 100 ms the frames are not printed one by one, only a
+// summary each second.
 //
 // -m listen: receive only, sending no acknowledgements or error flags.
 // -m loopback: a self-test; the adapter receives what it sends and nothing
 // reaches the bus.
+// -c: data bytes 0-3 carry a frame number; in loopback the numbers that come
+// back are checked for losses and order, and the round trip is timed.
 
 #include "../src/cansocket/gs_usb_device.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
+#include <deque>
 #include <format>
+#include <utility>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -31,7 +39,7 @@ std::atomic<bool> interrupted{false};
 void usage() {
     std::cerr << "usage: candle-test -l\n"
                  "       candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]\n"
-                 "                   [-s 123#1122334455667788]\n";
+                 "                   [-s 123#1122334455667788 [-p 1000] [-c]]\n";
 }
 
 std::optional<can_frame> parse_frame(const std::string& text) {
@@ -140,6 +148,8 @@ int main(int argc, char** argv) {
     uint32_t bitrate = 250000;
     unsigned seconds = 10;
     std::optional<can_frame> tx_frame;
+    unsigned period_ms = 1000;
+    bool numbered = false;
     can::detail::GsUsbDevice::Options options{.error_frames = true};
 
     for (int i = 1; i < argc; ++i) {
@@ -172,6 +182,14 @@ int main(int argc, char** argv) {
                     usage();
                     return 2;
                 }
+            } else if (arg == "-p" && has_value) {
+                period_ms = static_cast<unsigned>(std::stoul(argv[++i]));
+                if (period_ms == 0) {
+                    usage();
+                    return 2;
+                }
+            } else if (arg == "-c") {
+                numbered = true;
             } else if (arg == "-s" && has_value) {
                 tx_frame = parse_frame(argv[++i]);
                 if (!tx_frame) {
@@ -193,22 +211,33 @@ int main(int argc, char** argv) {
         return 2;
     }
     const size_t index = std::stoul(interface.substr(6));
+    if (numbered && tx_frame && tx_frame->len < 4) {
+        tx_frame->len = 4; // room for the number
+    }
 
     auto device = can::detail::GsUsbDevice::open(index, bitrate, options);
     if (!device) {
         return 1;
     }
+    auto& dev = **device;
+
+    using Clock = std::chrono::steady_clock;
+    const auto period = std::chrono::milliseconds(period_ms);
+    const bool quiet = tx_frame && period < std::chrono::milliseconds(100);
+
     std::cout << (options.loopback ? "Self-test, nothing goes to the bus. " : "")
               << (options.listen_only && !options.loopback ? "Listening only. " : "")
-              << "Receiving" << (tx_frame ? " and sending once a second" : "")
+              << "Receiving"
+              << (tx_frame ? " and sending every " + std::to_string(period_ms) + " ms" : "")
               << (seconds ? " for " + std::to_string(seconds) + " s" : " until Ctrl+C") << ".\n";
 
     // Ctrl+C ends the loop, so the adapter is closed properly (on Linux it
     // goes back to the gs_usb driver, as can0)
     std::signal(SIGINT, [](int) { interrupted = true; });
 
-    const auto start = std::chrono::steady_clock::now();
+    const auto start = Clock::now();
     auto next_send = start;
+    auto next_summary = start + std::chrono::seconds(1);
     unsigned received = 0;
     unsigned errors = 0;
     std::string last_error;
@@ -216,29 +245,72 @@ int main(int argc, char** argv) {
     unsigned sent = 0;
     unsigned send_errors = 0;
 
-    while (!interrupted && (*device)->good()) {
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - start).count();
-        if (seconds != 0 && elapsed >= seconds) {
+    // numbered frames: the next number to send, the next expected back, and
+    // when each number in flight was sent
+    uint32_t next_number = 0;
+    uint32_t expected_back = 0;
+    unsigned came_back = 0;
+    unsigned lost = 0;
+    unsigned out_of_order = 0;
+    std::deque<std::pair<uint32_t, Clock::time_point>> in_flight;
+    std::chrono::microseconds max_round_trip{0};
+    std::chrono::microseconds sum_round_trip{0};
+
+    const auto seconds_since_start = [&] { return std::chrono::duration<double>(Clock::now() - start).count(); };
+
+    while (!interrupted && dev.good()) {
+        const auto now = Clock::now();
+        if (seconds != 0 && now - start >= std::chrono::seconds(seconds)) {
             break;
         }
 
         if (tx_frame && now >= next_send) {
-            next_send += std::chrono::seconds(1);
-            if ((*device)->send(*tx_frame) == can::Status::ok) {
+            next_send += period;
+            if (now - next_send > std::chrono::seconds(1)) {
+                next_send = now + period; // far behind: no burst to catch up
+            }
+            can_frame frame = *tx_frame;
+            if (numbered) {
+                std::memcpy(frame.data, &next_number, sizeof(next_number));
+            }
+            if (dev.send(frame) == can::Status::ok) {
                 ++sent;
-                print_frame("TX", elapsed, *tx_frame);
+                if (numbered) {
+                    in_flight.emplace_back(next_number, now);
+                }
+                if (!quiet) {
+                    print_frame("TX", seconds_since_start(), frame);
+                }
             } else {
                 ++send_errors;
-                std::printf("%9.3f  TX  failed (no other node acknowledges? wrong bitrate?)\n", elapsed);
+                std::printf("%9.3f  TX  failed: the send queue is full or the adapter is gone\n",
+                            seconds_since_start());
             }
+            ++next_number;
         }
 
+        if (quiet && now >= next_summary) {
+            next_summary += std::chrono::seconds(1);
+            std::printf("%9.3f  sent %u, received %u", seconds_since_start(), sent, received);
+            if (numbered && options.loopback) {
+                std::printf(", came back %u, lost %u, out of order %u", came_back, lost, out_of_order);
+            }
+            std::printf("\n");
+            std::fflush(stdout);
+        }
+
+        auto wait = std::chrono::milliseconds(100);
+        if (tx_frame) {
+            wait = std::clamp(std::chrono::duration_cast<std::chrono::milliseconds>(next_send - Clock::now()),
+                              std::chrono::milliseconds(0), wait);
+        }
         can_frame frame{};
-        if ((*device)->recv(frame, std::chrono::milliseconds(100)) != can::Status::ok) {
+        if (dev.recv(frame, wait) != can::Status::ok) {
             continue;
         }
-        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const auto arrived = Clock::now();
+        const double t = std::chrono::duration<double>(arrived - start).count();
+
         if (frame.can_id & CAN_ERR_FLAG) {
             // a bus at the wrong bitrate gives hundreds a second: print each
             // kind at most once a second
@@ -249,13 +321,54 @@ int main(int argc, char** argv) {
                 last_error = error;
                 last_error_printed = t;
             }
-        } else {
-            ++received;
+            continue;
+        }
+
+        ++received;
+        if (!quiet) {
             print_frame("RX", t, frame);
+        }
+
+        if (numbered && options.loopback && tx_frame && frame.can_id == tx_frame->can_id && frame.len >= 4) {
+            uint32_t number;
+            std::memcpy(&number, frame.data, sizeof(number));
+            ++came_back;
+            if (number == expected_back) {
+                ++expected_back;
+            } else if (number > expected_back) {
+                lost += number - expected_back;
+                expected_back = number + 1;
+            } else {
+                ++out_of_order;
+            }
+            while (!in_flight.empty() && in_flight.front().first < number) {
+                in_flight.pop_front();
+            }
+            if (!in_flight.empty() && in_flight.front().first == number) {
+                const auto trip = std::chrono::duration_cast<std::chrono::microseconds>(arrived - in_flight.front().second);
+                max_round_trip = std::max(max_round_trip, trip);
+                sum_round_trip += trip;
+                in_flight.pop_front();
+            }
         }
     }
 
     std::cout << "Received " << received << " frames and " << errors << " error frames, sent " << sent
               << ", send errors " << send_errors << ".\n";
-    return (*device)->good() ? 0 : 1;
+    if (numbered && options.loopback) {
+        // frames still on their way when the time ran out are not lost
+        std::cout << std::format("Self-test: came back {} of {}, lost {}, out of order {}, "
+                                 "round trip {:.2f} ms on average, {:.2f} ms at most.\n",
+                                 came_back, sent, lost, out_of_order,
+                                 came_back ? sum_round_trip.count() / 1000.0 / came_back : 0.0,
+                                 max_round_trip.count() / 1000.0);
+    }
+    const auto stats = dev.take_stats();
+    std::cout << std::format("USB: sent {}, failed {}{}, dropped {}, longest send {:.2f} ms, longest send queue {}; "
+                             "received {}, dropped {}, adapter overflows {}.\n",
+                             stats.sent, stats.send_failed,
+                             stats.last_send_error.empty() ? "" : " (" + stats.last_send_error + ")",
+                             stats.send_dropped, stats.max_send_time.count() / 1000.0, stats.max_send_queue,
+                             stats.received, stats.receive_dropped, stats.adapter_overflows);
+    return dev.good() ? 0 : 1;
 }

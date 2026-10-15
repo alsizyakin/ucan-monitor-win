@@ -128,11 +128,14 @@ constexpr uint8_t request_type_in = static_cast<uint8_t>(LIBUSB_ENDPOINT_IN)
 
 constexpr uint16_t channel = 0;
 constexpr unsigned control_timeout_ms = 1000;
-// SocketCAN fails a send at once when the queue is full; this is close
-constexpr unsigned send_timeout_ms = 50;
 constexpr int rx_transfer_count = 16;
 constexpr size_t queue_limit = 10000;
 constexpr int rx_errors_to_give_up = 100;
+// frames in USB transfers at once, as many as the Linux gs_usb driver keeps
+// in flight (10) or fewer
+constexpr int tx_transfer_count = 8;
+// frames waiting for a transfer; SocketCAN queues 10 before it refuses
+constexpr size_t tx_queue_limit = 256;
 
 
 bool is_gs_usb(const libusb_device_descriptor& desc) {
@@ -170,6 +173,19 @@ int control_in(libusb_device_handle* handle, Request request, uint16_t value, in
 
 std::string error_text(int error) {
     return std::format("{} ({})", libusb_strerror(error), libusb_error_name(error));
+}
+
+
+std::string transfer_status_text(int status) {
+    switch (status) {
+    case LIBUSB_TRANSFER_ERROR: return "transfer error";
+    case LIBUSB_TRANSFER_TIMED_OUT: return "timed out";
+    case LIBUSB_TRANSFER_CANCELLED: return "cancelled";
+    case LIBUSB_TRANSFER_STALL: return "endpoint stalled";
+    case LIBUSB_TRANSFER_NO_DEVICE: return "adapter gone";
+    case LIBUSB_TRANSFER_OVERFLOW: return "overflow";
+    default: return std::format("status {}", status);
+    }
 }
 
 
@@ -448,6 +464,28 @@ Status GsUsbDevice::_start(uint32_t bitrate) {
                                   this, 0);
     }
 
+    /* SEND */
+    // Transfers waiting idle; send() fills one, or queues the frame for the
+    // next transfer to complete.
+    for (int i = 0; i < tx_transfer_count; ++i) {
+        auto slot = std::make_unique<TxSlot>();
+        slot->device = this;
+        slot->transfer = libusb_alloc_transfer(0);
+        if (slot->transfer == nullptr) {
+            bsclog::error("Failed to allocate a USB transfer.");
+            return Status::socketcan_init_failed;
+        }
+        libusb_fill_bulk_transfer(slot->transfer, _handle, _ep_out,
+                                  slot->frame.bytes.data(), static_cast<int>(slot->frame.bytes.size()),
+                                  [](libusb_transfer* t) {
+                                      auto* s = static_cast<TxSlot*>(t->user_data);
+                                      s->device->_on_tx(s);
+                                  },
+                                  slot.get(), 0);
+        _tx_idle.push_back(slot.get());
+        _tx_slots.push_back(std::move(slot));
+    }
+
     DeviceMode start{mode_start, mode_flags};
     result = control_out(_handle, request_mode, channel, _interface, start);
     if (result != sizeof(start)) {
@@ -498,6 +536,9 @@ GsUsbDevice::~GsUsbDevice() {
     for (libusb_transfer* transfer : _rx_transfers) {
         libusb_free_transfer(transfer);
     }
+    for (const auto& slot : _tx_slots) {
+        libusb_free_transfer(slot->transfer);
+    }
     if (_handle != nullptr) {
         libusb_close(_handle);
     }
@@ -508,11 +549,15 @@ GsUsbDevice::~GsUsbDevice() {
 
 
 void GsUsbDevice::_run_events() {
-    while (_rx_active > 0) {
+    // All transfer callbacks run here: nothing else handles libusb events.
+    while (_rx_active > 0 || _tx_active > 0) {
         if (_stopping) {
             // repeated each turn: a transfer may be resubmitted after a cancel
             for (libusb_transfer* transfer : _rx_transfers) {
                 libusb_cancel_transfer(transfer);
+            }
+            for (const auto& slot : _tx_slots) {
+                libusb_cancel_transfer(slot->transfer);
             }
         }
         timeval timeout{0, 100000};
@@ -522,7 +567,7 @@ void GsUsbDevice::_run_events() {
 
 
 void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
-    // Runs on whichever thread handles libusb events, one call at a time.
+    // Runs on the event thread.
     switch (transfer->status) {
     case LIBUSB_TRANSFER_COMPLETED: {
         _rx_errors_in_row = 0;
@@ -537,6 +582,10 @@ void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
         if ((host_frame.can_id & CAN_ERR_FLAG) && !_options.error_frames) {
             break;
         }
+        if (host_frame.flags & frame_flag_overflow) {
+            std::lock_guard<std::mutex> lock(_stats_mtx);
+            ++_stats.adapter_overflows;
+        }
         if ((host_frame.flags & frame_flag_overflow) && !_overflow_reported) {
             _overflow_reported = true;
             bsclog::warning("candleLight: the adapter dropped received frames (overflow).");
@@ -547,9 +596,17 @@ void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
         frame.len = std::min<uint8_t>(host_frame.can_dlc, CAN_MAX_DLEN);
         std::memcpy(frame.data, host_frame.data, CAN_MAX_DLEN);
         {
+            std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+            ++_stats.received;
+        }
+        {
             std::lock_guard<std::mutex> lock(_queue_mtx);
             if (_queue.size() >= queue_limit) {
                 _queue.pop_front();
+                {
+                    std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+                    ++_stats.receive_dropped;
+                }
                 if (!_queue_full_reported) {
                     _queue_full_reported = true;
                     bsclog::warning("candleLight: received frames are not read, dropping the oldest.");
@@ -605,17 +662,88 @@ Status GsUsbDevice::send(const can_frame& frame) {
     host_frame.channel = channel;
     std::memcpy(host_frame.data, frame.data, host_frame.can_dlc);
 
-    int transferred = 0;
-    const int result = libusb_bulk_transfer(_handle, _ep_out,
-                                            reinterpret_cast<unsigned char*>(&host_frame), sizeof(host_frame),
-                                            &transferred, send_timeout_ms);
-    if (result == LIBUSB_ERROR_NO_DEVICE) {
-        _mark_lost();
-    }
-    if (result != 0 || transferred != sizeof(host_frame)) {
+    TxFrame tx;
+    static_assert(sizeof(host_frame) == std::tuple_size_v<decltype(tx.bytes)>);
+    std::memcpy(tx.bytes.data(), &host_frame, sizeof(host_frame));
+    tx.queued = Clock::now();
+
+    std::lock_guard<std::mutex> lock(_tx_mtx);
+    if (_tx_queue.size() >= tx_queue_limit) {
+        std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+        ++_stats.send_dropped;
         return Status::send_error;
     }
+    _tx_queue.push_back(tx);
+    _drain_tx();
     return Status::ok;
+}
+
+
+void GsUsbDevice::_drain_tx() {
+    // with _tx_mtx held: the queue goes into idle transfers, in order
+    while (!_tx_idle.empty() && !_tx_queue.empty() && !_stopping && !_lost) {
+        TxSlot* slot = _tx_idle.back();
+        _tx_idle.pop_back();
+        const TxFrame frame = _tx_queue.front();
+        _tx_queue.pop_front();
+        if (!_submit_tx(slot, frame)) {
+            _tx_idle.push_back(slot); // the frame is counted as failed
+        }
+    }
+    std::lock_guard<std::mutex> lock(_stats_mtx);
+    _stats.max_send_queue = std::max(_stats.max_send_queue, _tx_queue.size());
+}
+
+
+bool GsUsbDevice::_submit_tx(TxSlot* slot, const TxFrame& frame) {
+    // with _tx_mtx held
+    slot->frame = frame;
+    const int result = libusb_submit_transfer(slot->transfer);
+    if (result != 0) {
+        {
+            std::lock_guard<std::mutex> lock(_stats_mtx);
+            ++_stats.send_failed;
+            _stats.last_send_error = error_text(result);
+        }
+        if (result == LIBUSB_ERROR_NO_DEVICE) {
+            _mark_lost();
+        }
+        return false;
+    }
+    ++_tx_active;
+    return true;
+}
+
+
+void GsUsbDevice::_on_tx(TxSlot* slot) {
+    // Runs on the event thread.
+    const libusb_transfer* transfer = slot->transfer;
+    if (transfer->status == LIBUSB_TRANSFER_COMPLETED && transfer->actual_length == transfer->length) {
+        const auto time = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - slot->frame.queued);
+        std::lock_guard<std::mutex> lock(_stats_mtx);
+        ++_stats.sent;
+        _stats.max_send_time = std::max(_stats.max_send_time, time);
+    } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
+        std::lock_guard<std::mutex> lock(_stats_mtx);
+        ++_stats.send_failed;
+        _stats.last_send_error = transfer->status == LIBUSB_TRANSFER_COMPLETED
+                ? std::format("short transfer ({} of {} bytes)", transfer->actual_length, transfer->length)
+                : transfer_status_text(transfer->status);
+    }
+    if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE) {
+        _mark_lost();
+    }
+
+    std::lock_guard<std::mutex> lock(_tx_mtx);
+    --_tx_active;
+    _tx_idle.push_back(slot);
+    _drain_tx();
+}
+
+
+GsUsbDevice::Stats GsUsbDevice::take_stats() {
+    std::lock_guard<std::mutex> lock(_stats_mtx);
+    return std::exchange(_stats, Stats{});
 }
 
 

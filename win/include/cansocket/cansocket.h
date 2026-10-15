@@ -70,6 +70,21 @@ private:
     std::atomic<bool> _connected{false};
     static constexpr std::chrono::milliseconds _recv_timeout{1};
 
+    // Diagnostics for log.txt; touched under _recv_mtx only.
+    struct Diagnostics {
+        std::chrono::steady_clock::time_point period_start;
+        std::chrono::steady_clock::time_point last_recv;
+        std::chrono::microseconds max_pause{0}; // between recv() calls, this period
+        std::chrono::microseconds max_pause_total{0};
+        uint64_t sent{0};
+        uint64_t send_failed{0};
+        uint64_t send_dropped{0};
+        uint64_t received{0};
+        uint64_t receive_dropped{0};
+    };
+    Diagnostics _diag;
+    void _report(bool final);
+
     std::mutex _send_mtx;
     std::mutex _recv_mtx;
 

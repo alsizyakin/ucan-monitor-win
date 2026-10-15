@@ -53,6 +53,9 @@ public:
     GsUsbDevice(const GsUsbDevice&) = delete;
     GsUsbDevice& operator=(const GsUsbDevice&) = delete;
 
+    // Queues a frame and returns at once, as a SocketCAN socket does: the
+    // frames go to the adapter in order, several USB transfers at a time.
+    // Fails only when the queue is full or the adapter is gone.
     Status send(const can_frame& frame);
     // Waits up to timeout for a frame received from the bus.
     Status recv(can_frame& frame, std::chrono::milliseconds timeout);
@@ -60,10 +63,41 @@ public:
     // False once the adapter is gone (unplugged).
     bool good() const { return !_lost; }
 
+    // What happened to the frames since the last call.
+    struct Stats {
+        uint64_t sent{0};          // taken by the adapter
+        uint64_t send_failed{0};   // lost in a failed USB transfer
+        uint64_t send_dropped{0};  // refused: the send queue was full
+        std::string last_send_error;
+        size_t max_send_queue{0};  // frames waiting for a USB transfer, at most
+        std::chrono::microseconds max_send_time{0}; // from send() to the adapter taking it
+        uint64_t received{0};
+        uint64_t receive_dropped{0};  // the receive queue was full
+        uint64_t adapter_overflows{0}; // frames flagged: the adapter dropped some before
+    };
+    Stats take_stats();
+
 private:
+    using Clock = std::chrono::steady_clock;
+
+    // a frame on its way to the adapter, as gs_usb sends it
+    struct TxFrame {
+        std::array<uint8_t, 20> bytes{};
+        Clock::time_point queued;
+    };
+
+    struct TxSlot {
+        GsUsbDevice* device{nullptr};
+        libusb_transfer* transfer{nullptr};
+        TxFrame frame;
+    };
+
     GsUsbDevice() = default;
     Status _start(uint32_t bitrate);
     void _on_rx(libusb_transfer* transfer);
+    void _on_tx(TxSlot* slot);
+    void _drain_tx();
+    bool _submit_tx(TxSlot* slot, const TxFrame& frame);
     void _mark_lost();
     void _run_events();
 
@@ -90,6 +124,15 @@ private:
     std::condition_variable _queue_cv;
     std::deque<can_frame> _queue;
     bool _queue_full_reported{false};
+
+    std::mutex _tx_mtx;
+    std::deque<TxFrame> _tx_queue;
+    std::vector<std::unique_ptr<TxSlot>> _tx_slots;
+    std::vector<TxSlot*> _tx_idle;
+    std::atomic<int> _tx_active{0};
+
+    std::mutex _stats_mtx;
+    Stats _stats;
 };
 
 
