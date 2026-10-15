@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Windows image to build on
+        type: choice
+        options: [windows-latest, windows-2022, windows-2025]
+        default: windows-latest
   schedule:
     - cron: '0 3 * * *' # 06:00 Moscow time
 
@@ -16,8 +22,7 @@ concurrency:
 
 jobs:
   build:
-    # Windows 11 based: it opens upstream's util/aux.h as a plain file
-    runs-on: windows-2025
+    runs-on: ${{ inputs.runner || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -27,19 +32,16 @@ jobs:
         run: |
           # upstream's own submodules (imgui, implot, ...) have SSH URLs; the runner has no key
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          # upstream has src/ucanopen_servers/atvvcu/util/aux.h; Git for Windows
-          # refuses AUX, a DOS device name, unless this check is off
-          git config --global core.protectNTFS false
           # keep upstream sources byte for byte as in the repository, so the patches apply
           git config --global core.autocrlf false
-          git submodule update --init upstream
-          old=$(git -C upstream rev-parse HEAD)
 
+          old=$(git ls-tree HEAD upstream | awk '{ print $3 }')
           # nightly and manual runs follow upstream develop; pushes build the recorded commit
           if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            git submodule update --remote upstream
+            sh win/checkout-upstream.sh --latest
+          else
+            sh win/checkout-upstream.sh
           fi
-          git -C upstream submodule update --init --recursive
 
           new=$(git -C upstream rev-parse HEAD)
           echo "sha=${new:0:7}" >> "$GITHUB_OUTPUT"
@@ -58,7 +60,7 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Apply Windows patches
+      - name: Prepare upstream for Windows
         if: steps.upstream.outputs.build == 'true'
         shell: bash
         run: sh win/patches/apply.sh

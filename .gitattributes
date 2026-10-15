@@ -1,3 +1,4 @@
-# Shell scripts and patches must reach the Windows runner byte for byte
-*.sh text eol=lf
+# Line endings stay LF on Windows too: the scripts, the renames list and
+# the patches must reach the runner byte for byte
+* text=auto eol=lf
 *.patch -text

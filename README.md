@@ -21,6 +21,7 @@
 | `win/include/cansocket/cansocket.h` | замена заголовка `can::Socket` с тем же интерфейсом |
 | `win/src/cansocket/` | работа с candleLight вместо SocketCAN |
 | `win/res/` | манифест Windows: UTF-8 для путей с кириллицей |
+| `win/checkout-upstream.sh` | загрузка `upstream/` без файлов, которые Windows не может хранить |
 | `win/patches/` | мелкие исправления кода разработчика для Windows, см. ниже |
 | `CMakeLists.txt` | собирает `upstream/src` без `upstream/src/cansocket/`, плюс `win/` |
 | `.github/workflows/windows.yml` | автосборка под Windows |
@@ -31,25 +32,28 @@
 
 ## Патчи
 
-То, что нельзя подменить заголовком, исправляется патчами в `win/patches/`.
-Автосборка накладывает их на `upstream/` скриптом `win/patches/apply.sh`:
+То, что нельзя подменить заголовком, исправляется в копии кода разработчика
+на машине сборки. Его репозиторий при этом не меняется, и туда ничего не
+отправляется.
 
-- патч, который разработчик уже внёс к себе, пропускается;
-- патч, строки которого разработчик изменил иначе, останавливает сборку.
+`win/patches/apply.sh` делает это после загрузки `upstream/`:
 
-Каждый патч начинается с пояснения, зачем он нужен, и годится для отправки
-разработчику: чем больше их он примет, тем меньше остаётся здесь.
+1. **Переименования** (`win/patches/renames`). В коде разработчика есть файл
+   `src/ucanopen_servers/atvvcu/util/aux.h`, а `AUX` — зарезервированное имя
+   устройства: Windows 10 не может хранить такой файл, Git для Windows
+   отказывается его создавать. `win/checkout-upstream.sh` не записывает его на
+   диск, а `apply.sh` пишет его содержимое (из git разработчика, всегда
+   актуальное) в `aux_.h`.
+2. **Патчи** `win/patches/*.patch`:
+   - патч, который разработчик уже внёс к себе, пропускается;
+   - патч, строки которого разработчик изменил иначе, останавливает сборку.
 
 | Патч | Причина |
 |---|---|
 | `0001-reference_manager-convert-paths-explicitly.patch` | на Windows `std::filesystem::path` не преобразуется в `std::string` неявно |
+| `0002-atvvcu-include-aux-under-a-windows-name.patch` | `#include "util/aux.h"` → `"util/aux_.h"` (см. переименования) |
 
-Кроме того, в коде разработчика есть файл `src/ucanopen_servers/atvvcu/util/aux.h`:
-`AUX` — зарезервированное имя устройства в Windows. Git для Windows отказывается
-его создавать, поэтому автосборка отключает эту проверку
-(`core.protectNTFS false`) и работает на Windows Server 2025, который, как
-и Windows 11, открывает `aux.h` как обычный файл. На Windows 10 исходники так
-не собрать; готовой программе это не мешает.
+Каждый патч начинается с пояснения, зачем он нужен.
 
 ## Обновление
 
@@ -67,43 +71,44 @@ GitHub Actions (`windows.yml`):
 
 ## Запуск
 
+Нужна 64-битная Windows 10 или 11. На Windows 10 версии ниже 1903 (например,
+LTSC 2019) программа работает, но сохранение файлов в папки с кириллицей
+в пути может не работать.
+
 Распаковать архив и запустить `ucan-monitor\bin\ucan-monitor.exe`. Рядом
 с программой должны оставаться папки `bin\` и `assets\`: шрифты загружаются
 из `..\assets`. Журнал пишется в `bin\log.txt`.
 
 ## Сборка вручную
 
-Нужен submodule вместе с вложенными. На Windows до клонирования:
-`git config --global core.protectNTFS false` (см. «Патчи»).
+Одинаково на Windows 10, 11 и Linux. Клонировать без `--recursive`: код
+разработчика загружает скрипт, который пропускает `aux.h`.
 
 ```bash
-git clone --recursive git@github.com:alsizyakin/ucan-monitor-win.git
-# или в уже склонированном
-git submodule update --init --recursive
+git clone git@github.com:alsizyakin/ucan-monitor-win.git
+cd ucan-monitor-win
+sh win/checkout-upstream.sh            # версия, зафиксированная здесь
+# или: sh win/checkout-upstream.sh --latest   свежий develop разработчика
+sh win/patches/apply.sh
 ```
 
 **Windows**, в оболочке MSYS2 UCRT64:
 
 ```bash
 pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,libatomic,cmake,ninja,glfw,boost}
-sh win/patches/apply.sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 cmake --install build --prefix dist/ucan-monitor
 ```
 
-**Linux** — теми же командами (патчи здесь не нужны, Boost и GLFW — как
-в README разработчика). Linux-сборка этого репозитория использует тот же
-код работы с адаптером, что и Windows (не SocketCAN), поэтому на ней удобно
-отлаживать работу с candleLight.
+**Linux** — теми же командами (Boost и GLFW — как в README разработчика).
+Linux-сборка этого репозитория использует тот же код работы с адаптером, что
+и Windows (не SocketCAN), поэтому на ней удобно отлаживать работу
+с candleLight.
 
-Обновить `upstream/` до свежего `develop` вручную (сначала снять патчи:
-`git -C upstream checkout -- .`):
-
-```bash
-git submodule update --remote upstream
-git -C upstream submodule update --init --recursive
-```
+Чтобы перейти на другую версию кода разработчика, сначала снять патчи:
+`git -C upstream checkout -- .`, затем снова `checkout-upstream.sh`
+и `apply.sh`.
 
 ## Если автосборка сломалась
 
@@ -117,7 +122,10 @@ git -C upstream submodule update --init --recursive
 - **не найдена библиотека или файл** — в `upstream/CMakeLists.txt` появилась
   новая зависимость; добавить её в `CMakeLists.txt` и в `windows.yml`;
 - **`<патч>: no longer applies`** — разработчик изменил строки, которые правит
-  патч; посмотреть, нужен ли патч ещё, и пересоздать его по свежему коду.
+  патч; посмотреть, нужен ли патч ещё, и пересоздать его по свежему коду;
+- **`<файл>: not in upstream any more`** — разработчик переименовал или удалил
+  файл из `win/patches/renames`; убрать его из списка вместе с патчем,
+  который на него ссылается.
 
 Пока сборка не исправлена, в `upstream/` остаётся последняя версия, которая
 собиралась.

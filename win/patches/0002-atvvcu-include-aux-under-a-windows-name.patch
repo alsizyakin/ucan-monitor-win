@@ -1,0 +1,20 @@
+atvvcu: include util/aux.h under a name Windows can hold
+
+AUX is a DOS device name: Windows 10 cannot hold a file named aux.h, and
+Git for Windows refuses to check it out. win/checkout-upstream.sh leaves
+it out, apply.sh writes its content as util/aux_.h (win/patches/renames),
+and this patch points the #include there.
+
+diff --git a/src/ucanopen_servers/atvvcu/atvvcu_server.h b/src/ucanopen_servers/atvvcu/atvvcu_server.h
+index bf26337..68b63ea 100644
+--- a/src/ucanopen_servers/atvvcu/atvvcu_server.h
++++ b/src/ucanopen_servers/atvvcu/atvvcu_server.h
+@@ -17,7 +17,7 @@
+ #include "util/gear.h"
+ #include "util/pdm.h"
+ #include "util/esp.h"
+-#include "util/aux.h"
++#include "util/aux_.h"
+ 
+ 
+ namespace atvvcu {

@@ -1,0 +1,8 @@
+# Upstream files Windows 10 cannot hold under their own name (DOS device
+# names: CON, PRN, AUX, NUL, COM1-9, LPT1-9, with any extension).
+# win/checkout-upstream.sh leaves each out of upstream/, apply.sh writes its
+# content from the checked-out commit to the new path, and a patch points
+# the #include there.
+#
+# <upstream path>                         <new path>
+src/ucanopen_servers/atvvcu/util/aux.h    src/ucanopen_servers/atvvcu/util/aux_.h
