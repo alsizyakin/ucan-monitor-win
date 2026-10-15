@@ -78,6 +78,8 @@ jobs:
             ninja:p
             glfw:p
             boost:p
+            pkgconf:p
+            libusb:p
 
       - name: Build
         if: steps.upstream.outputs.build == 'true'
@@ -86,6 +88,7 @@ jobs:
           git config --global --add safe.directory '*'
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build -- -k 0
+          ctest --test-dir build --output-on-failure
           cmake --install build --prefix dist/ucan-monitor
           ls dist/ucan-monitor/bin
 

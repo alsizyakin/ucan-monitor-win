@@ -5,11 +5,65 @@ project(ucan-monitor VERSION 1.0 LANGUAGES C CXX)
 
 set(upstream_dir ${PROJECT_SOURCE_DIR}/upstream)
 if(NOT EXISTS ${upstream_dir}/include/imgui/imgui.h)
-    message(FATAL_ERROR "upstream/ is not checked out: run 'git submodule update --init --recursive'")
+    message(FATAL_ERROR "upstream/ is not checked out: run 'sh win/checkout-upstream.sh' and 'sh win/patches/apply.sh'")
 endif()
 
 ################################################################################
-# Sources: all of upstream except its SocketCAN backend, which win/ replaces
+# Options all targets share
+add_library(common_options INTERFACE)
+
+target_compile_options(common_options INTERFACE
+    $<$<CONFIG:Debug>:-Og -ggdb>
+    $<$<CONFIG:Release>:-O3 -g0>
+    -Wall
+    -Wextra
+    -Wpedantic
+    -fdiagnostics-color=auto
+)
+
+target_compile_features(common_options INTERFACE
+    c_std_11
+    cxx_std_23
+)
+
+if(WIN32)
+    # The CAN messages are structs with bit-fields copied byte for byte into
+    # frames. MinGW lays bit-fields out the MSVC way by default; this flag
+    # keeps the GCC layout the Linux build and the firmware use.
+    target_compile_options(common_options INTERFACE -mno-ms-bitfields)
+
+    # localtime_r() from the MinGW-w64 <time.h>
+    target_compile_definitions(common_options INTERFACE
+        _POSIX_THREAD_SAFE_FUNCTIONS=200112L
+    )
+endif()
+
+################################################################################
+# candle: the CAN backend, can::Socket over a candleLight adapter (libusb)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
+
+file(GLOB_RECURSE candle_sources CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/win/src/cansocket/*.cpp
+)
+add_library(candle STATIC ${candle_sources})
+
+target_include_directories(candle PUBLIC
+    ${PROJECT_SOURCE_DIR}/win/include
+    ${upstream_dir}/include # bsclog
+)
+
+target_link_libraries(candle PUBLIC
+    common_options
+    PkgConfig::libusb
+)
+
+if(WIN32)
+    target_link_libraries(candle PUBLIC winmm) # timeBeginPeriod()
+endif()
+
+################################################################################
+# Sources: all of upstream except its SocketCAN backend, which candle replaces
 file(GLOB_RECURSE app_sources CONFIGURE_DEPENDS
     ${upstream_dir}/src/*.c
     ${upstream_dir}/src/*.cpp
@@ -18,10 +72,6 @@ file(GLOB_RECURSE upstream_can_sources CONFIGURE_DEPENDS
     ${upstream_dir}/src/cansocket/*
 )
 list(REMOVE_ITEM app_sources ${upstream_can_sources})
-
-file(GLOB_RECURSE win_sources CONFIGURE_DEPENDS
-    ${PROJECT_SOURCE_DIR}/win/src/*.cpp
-)
 
 ################################################################################
 # Dear ImGui, as upstream builds it
@@ -44,7 +94,6 @@ set(executable ${CMAKE_PROJECT_NAME})
 
 add_executable(${executable}
     ${app_sources}
-    ${win_sources}
     ${imgui_sources}
     ${imgui_backend_sources}
 )
@@ -66,39 +115,15 @@ target_compile_definitions(${executable} PRIVATE
 )
 
 target_link_libraries(${executable} PRIVATE
+    common_options
+    candle
     atomic
     glfw
     OpenGL::GL
 )
 
-target_compile_options(${executable} PRIVATE
-    $<$<CONFIG:Debug>:-Og -ggdb>
-    $<$<CONFIG:Release>:-O3 -g0>
-    -Wall
-    -Wextra
-    -Wpedantic
-    -fdiagnostics-color=auto
-)
-
-target_compile_features(${executable} PRIVATE
-    c_std_11
-    cxx_std_23
-)
-
-################################################################################
-# Windows
 if(WIN32)
     enable_language(RC)
-
-    # The CAN messages are structs with bit-fields copied byte for byte into
-    # frames. MinGW lays bit-fields out the MSVC way by default; this flag
-    # keeps the GCC layout the Linux build and the firmware use.
-    target_compile_options(${executable} PRIVATE -mno-ms-bitfields)
-
-    # localtime_r() from the MinGW-w64 <time.h>
-    target_compile_definitions(${executable} PRIVATE
-        _POSIX_THREAD_SAFE_FUNCTIONS=200112L
-    )
 
     # Manifest: UTF-8 as the process code page, so that the UTF-8 paths ImGui
     # and the file dialog produce open correctly with Cyrillic in them.
@@ -119,6 +144,22 @@ target_link_libraries(${executable} PRIVATE
 )
 
 ################################################################################
+# candle-test: checks an adapter without the GUI
+add_executable(candle-test ${PROJECT_SOURCE_DIR}/win/tools/candle-test.cpp)
+target_link_libraries(candle-test PRIVATE candle)
+
+################################################################################
+# Tests
+enable_testing()
+
+add_executable(bittiming_test
+    ${PROJECT_SOURCE_DIR}/win/tests/bittiming_test.cpp
+    ${PROJECT_SOURCE_DIR}/win/src/cansocket/bittiming.cpp
+)
+target_link_libraries(bittiming_test PRIVATE common_options)
+add_test(NAME bittiming COMMAND bittiming_test)
+
+################################################################################
 # Misc Options
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -127,11 +168,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # loads its fonts from ../assets relative to the working directory, which is
 # bin/ when it is started from Explorer.
 if(WIN32)
-    # Ship the DLLs the program imports from the toolchain (GLFW, the GCC
-    # runtime, libatomic), found by reading the executable's import table.
+    # Ship the DLLs the programs import from the toolchain (GLFW, libusb, the
+    # GCC runtime, libatomic), found by reading their import tables.
     # Installing fails if one cannot be found.
     get_filename_component(toolchain_bin_dir ${CMAKE_CXX_COMPILER} DIRECTORY)
-    install(TARGETS ${executable}
+    install(TARGETS ${executable} candle-test
         RUNTIME_DEPENDENCY_SET runtime_dlls
         RUNTIME DESTINATION bin
     )
@@ -143,7 +184,7 @@ if(WIN32)
         RUNTIME DESTINATION bin
     )
 else()
-    install(TARGETS ${executable}
+    install(TARGETS ${executable} candle-test
         RUNTIME DESTINATION bin
     )
 endif()

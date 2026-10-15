@@ -7,10 +7,13 @@
 
 #include <linux/can.h>
 
+// The standard headers the upstream one includes: upstream code may rely on
+// getting them through it.
 #include <cerrno>
 #include <cstring>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -55,18 +58,24 @@ namespace detail {
 const std::vector<std::string> interface_list = {"candle0", "candle1"};
 const std::vector<std::string> bitrate_list = {"125000", "250000", "500000", "1000000"};
 
+class GsUsbDevice;
+
 
 } // namespace detail
 
 
 class Socket {
 private:
-    bool _open{false};
+    std::unique_ptr<detail::GsUsbDevice> _device;
+    std::atomic<bool> _connected{false};
+    static constexpr std::chrono::milliseconds _recv_timeout{1};
 
     std::mutex _send_mtx;
     std::mutex _recv_mtx;
 
 public:
+    // Connects as last time, if it was saved: SocketCAN keeps an interface up
+    // between runs, and upstream connects to it at start.
     Socket();
     ~Socket();
     Socket(const Socket& other) = delete;
@@ -78,7 +87,7 @@ public:
     Status send(const can_frame& frame);
     Status recv(can_frame& frame);
 
-    bool good() const { return _open; }
+    bool good() const { return _connected; }
 };
 
 

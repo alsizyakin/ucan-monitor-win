@@ -3,8 +3,7 @@
 Сборка [uCAN Monitor](https://github.com/OlegAushev/ucan-monitor) под Windows
 с USB-CAN адаптером candleLight.
 
-> **Состояние:** работа с адаптером пока не написана (заглушка). Программа
-> запускается, но к шине CAN не подключается.
+> **Состояние:** работа с адаптером написана и проверяется на оборудовании.
 
 ## Как это устроено
 
@@ -19,7 +18,9 @@
 |---|---|
 | `win/include/linux/can.h` | замена `<linux/can.h>`: `can_frame`, `canid_t` |
 | `win/include/cansocket/cansocket.h` | замена заголовка `can::Socket` с тем же интерфейсом |
-| `win/src/cansocket/` | работа с candleLight вместо SocketCAN |
+| `win/src/cansocket/` | работа с candleLight через libusb (протокол gs_usb) вместо SocketCAN |
+| `win/tools/candle-test.cpp` | утилита проверки адаптера без графического интерфейса |
+| `win/tests/` | тесты |
 | `win/res/` | манифест Windows: UTF-8 для путей с кириллицей |
 | `win/checkout-upstream.sh` | загрузка `upstream/` без файлов, которые Windows не может хранить |
 | `win/patches/` | мелкие исправления кода разработчика для Windows, см. ниже |
@@ -79,6 +80,38 @@ LTSC 2019) программа работает, но сохранение фай
 с программой должны оставаться папки `bin\` и `assets\`: шрифты загружаются
 из `..\assets`. Журнал пишется в `bin\log.txt`.
 
+## Адаптер candleLight
+
+**Windows.** Драйвер ставить не нужно: прошивка candleLight сама просит у
+Windows драйвер WinUSB, права администратора не нужны.
+
+**Подключение.** *Настройка → SocketCAN*: интерфейс `candle0` (первый
+найденный адаптер, `candle1` — второй), битрейт, *Подключить*. Удачное
+подключение запоминается в `bin\cansocket.cfg`, и при следующем запуске
+программа подключается сама, как Linux-версия к уже поднятому `can0`.
+Битовые параметры считаются по частоте адаптера с той же точкой выборки, что
+выбирает Linux; они пишутся в журнал.
+
+**`candle-test`** проверяет адаптер без графического интерфейса:
+
+```
+candle-test -l                                список адаптеров
+candle-test -b 250000 -t 10                   принимать 10 с и печатать кадры
+candle-test -b 250000 -s 123#1122334455667788 и раз в секунду отправлять кадр
+```
+
+Ctrl+C завершает её корректно.
+
+**Linux.** На время работы программа забирает адаптер у системного драйвера:
+`can0` пропадает и возвращается после закрытия. По умолчанию к USB-устройству
+есть доступ только у root: запускать через `sudo` или поставить правило udev
+`/etc/udev/rules.d/70-candlelight.rules`, после чего переподключить адаптер:
+
+```
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="2323", TAG+="uaccess"
+```
+
 ## Сборка вручную
 
 Одинаково на Windows 10, 11 и Linux. Клонировать без `--recursive`: код
@@ -95,13 +128,14 @@ sh win/patches/apply.sh
 **Windows**, в оболочке MSYS2 UCRT64:
 
 ```bash
-pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,libatomic,cmake,ninja,glfw,boost}
+pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,libatomic,cmake,ninja,glfw,boost,pkgconf,libusb}
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 cmake --install build --prefix dist/ucan-monitor
 ```
 
-**Linux** — теми же командами (Boost и GLFW — как в README разработчика).
+**Linux** — теми же командами (Boost и GLFW — как в README разработчика,
+плюс `libusb-1.0-0-dev`).
 Linux-сборка этого репозитория использует тот же код работы с адаптером, что
 и Windows (не SocketCAN), поэтому на ней удобно отлаживать работу
 с candleLight.
