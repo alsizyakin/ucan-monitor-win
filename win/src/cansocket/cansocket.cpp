@@ -57,7 +57,7 @@ Status Socket::connect(const std::string& interface, const std::string& bitrate)
 
     bsclog::info("Opening {} at {} bit/s...", interface, bitrate);
     const auto index = static_cast<size_t>(interface_it - detail::interface_list.begin());
-    auto device = detail::GsUsbDevice::open(index, static_cast<uint32_t>(std::stoul(bitrate)));
+    auto device = detail::GsUsbDevice::open(index, static_cast<uint32_t>(std::stoul(bitrate)), {});
     if (!device) {
         bsclog::error("Failed to open {}. Error code: {}", interface, std::to_underlying(device.error()));
         return device.error();

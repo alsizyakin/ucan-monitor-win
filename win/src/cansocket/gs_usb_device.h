@@ -30,11 +30,23 @@ namespace can::detail {
 // same way on Windows (WinUSB) and Linux.
 class GsUsbDevice {
 public:
+    struct Options {
+        // receive only: no acknowledgements, no error flags on the bus
+        bool listen_only{false};
+        // the controller receives what it sends; with listen_only nothing
+        // reaches the bus, a self-test of the adapter and the USB path
+        bool loopback{false};
+        // hand error frames (CAN_ERR_FLAG) to recv(); SocketCAN raw sockets
+        // get none unless they ask, so can::Socket does not
+        bool error_frames{false};
+    };
+
     // Descriptions of the gs_usb adapters on USB, in the order open() counts them.
     static std::vector<std::string> list();
 
     // Opens the index-th gs_usb adapter on USB and starts its channel 0 at bitrate.
-    static std::expected<std::unique_ptr<GsUsbDevice>, Status> open(size_t index, uint32_t bitrate);
+    static std::expected<std::unique_ptr<GsUsbDevice>, Status> open(size_t index, uint32_t bitrate,
+                                                                    const Options& options);
 
     // Stops the channel and hands the adapter back to the system.
     ~GsUsbDevice();
@@ -55,6 +67,7 @@ private:
     void _mark_lost();
     void _run_events();
 
+    Options _options;
     libusb_context* _ctx{nullptr};
     libusb_device_handle* _handle{nullptr};
     bool _claimed{false};

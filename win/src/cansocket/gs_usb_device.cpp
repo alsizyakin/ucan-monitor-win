@@ -90,6 +90,11 @@ struct DeviceMode {
 constexpr uint32_t mode_reset = 0;
 constexpr uint32_t mode_start = 1;
 
+// bits of BtConst::feature, and of DeviceMode::flags to use them
+constexpr uint32_t feature_listen_only = 1 << 0;
+constexpr uint32_t feature_loop_back = 1 << 1;
+constexpr uint32_t feature_berr_reporting = 1 << 12;
+
 // A classic CAN frame on the bulk endpoints
 struct HostFrame {
     uint32_t echo_id;
@@ -234,9 +239,11 @@ std::vector<std::string> GsUsbDevice::list() {
 }
 
 
-std::expected<std::unique_ptr<GsUsbDevice>, Status> GsUsbDevice::open(size_t index, uint32_t bitrate) {
+std::expected<std::unique_ptr<GsUsbDevice>, Status> GsUsbDevice::open(size_t index, uint32_t bitrate,
+                                                                     const Options& options) {
     // Every early return below runs the destructor, which undoes what was done.
     std::unique_ptr<GsUsbDevice> dev(new GsUsbDevice);
+    dev->_options = options;
 
     int error = libusb_init_context(&dev->_ctx, nullptr, 0);
     if (error != 0) {
@@ -368,6 +375,26 @@ Status GsUsbDevice::_start(uint32_t bitrate) {
         return Status::socketcan_init_failed;
     }
 
+    uint32_t mode_flags = 0;
+    if (_options.listen_only) {
+        if (!(bt_const.feature & feature_listen_only)) {
+            bsclog::error("The adapter cannot listen only.");
+            return Status::socketcan_init_failed;
+        }
+        mode_flags |= feature_listen_only;
+    }
+    if (_options.loopback) {
+        if (!(bt_const.feature & feature_loop_back)) {
+            bsclog::error("The adapter cannot loop back.");
+            return Status::socketcan_init_failed;
+        }
+        mode_flags |= feature_loop_back;
+    }
+    // newer firmware reports bus errors only when asked; older always does
+    if (_options.error_frames && (bt_const.feature & feature_berr_reporting)) {
+        mode_flags |= feature_berr_reporting;
+    }
+
     const auto timing = calculate_bittiming(bitrate, BittimingLimits{
         .fclk = bt_const.fclk_can,
         .tseg1_min = bt_const.tseg1_min,
@@ -421,7 +448,7 @@ Status GsUsbDevice::_start(uint32_t bitrate) {
                                   this, 0);
     }
 
-    DeviceMode start{mode_start, 0};
+    DeviceMode start{mode_start, mode_flags};
     result = control_out(_handle, request_mode, channel, _interface, start);
     if (result != sizeof(start)) {
         bsclog::error("Failed to start the CAN channel: {}.", error_text(result));
@@ -507,8 +534,7 @@ void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
         if (host_frame.echo_id != rx_echo_id || host_frame.channel != channel) {
             break;
         }
-        // error frames: a SocketCAN raw socket gets none unless it asks
-        if (host_frame.can_id & CAN_ERR_FLAG) {
+        if ((host_frame.can_id & CAN_ERR_FLAG) && !_options.error_frames) {
             break;
         }
         if ((host_frame.flags & frame_flag_overflow) && !_overflow_reported) {
