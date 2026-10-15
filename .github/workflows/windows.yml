@@ -3,6 +3,8 @@ name: windows
 on:
   push:
     branches: [main]
+    # documentation alone changes nothing in the program
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -25,6 +27,8 @@ jobs:
     runs-on: ${{ inputs.runner || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # release notes list the commits since the last release
 
       - name: Check out upstream
         id: upstream
@@ -111,4 +115,44 @@ jobs:
 
           $(git -C upstream log --oneline "${{ steps.upstream.outputs.old }}..HEAD")
           EOF
+          git pull -q --rebase
           git push
+
+      - name: Publish the release
+        # a new upstream commit, or a change here pushed to main
+        if: >-
+          steps.upstream.outputs.build == 'true' && github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || steps.upstream.outputs.changed == 'true')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          target=$(git rev-parse HEAD)
+          upstream=$(git -C upstream rev-parse HEAD)
+          previous=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+
+          # always the same name, so .../releases/latest/download/ucan-monitor-win.zip stays valid
+          (cd dist && 7z a -tzip -bso0 -bsp0 ../ucan-monitor-win.zip ucan-monitor)
+
+          {
+            echo "Код разработчика: \`develop\` $(git -C upstream log -1 --date=format:%d.%m.%Y --format='%h от %cd: %s')."
+            if [ -n "$previous" ]; then
+              previous_upstream=$(git ls-tree "$previous" upstream | awk '{ print $3 }')
+              echo
+              echo "**Изменения разработчика с $previous:**"
+              git -C upstream log --format='- %s' "$previous_upstream..$upstream" | grep . || echo "- нет"
+              echo
+              echo "**Изменения сборки для Windows с $previous:**"
+              git log --format='- %s' "$previous..$target" -- . ':!upstream' ':!*.md' ':!docs' | grep . || echo "- нет"
+            fi
+            echo
+            echo "Распаковать \`ucan-monitor-win.zip\` и запустить \`ucan-monitor\\bin\\ucan-monitor.exe\`." \
+                 "Подробнее — в [README](https://github.com/$GITHUB_REPOSITORY#readme)."
+          } > notes.md
+          cat notes.md
+
+          gh release create "win-$GITHUB_RUN_NUMBER" ucan-monitor-win.zip \
+            --target "$target" \
+            --title "uCAN Monitor for Windows: develop ${upstream:0:7}, $(date +%Y-%m-%d)" \
+            --notes-file notes.md \
+            --latest

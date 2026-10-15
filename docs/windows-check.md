@@ -13,13 +13,9 @@
 
 ## 1. Скачать и распаковать
 
-Один из вариантов:
-
-- **с GitHub** (нужен вход в аккаунт GitHub): страница
-  [Actions](https://github.com/alsizyakin/ucan-monitor-win/actions) →
-  последний запуск *windows* с зелёной галочкой → внизу, в разделе
-  *Artifacts*, архив `ucan-monitor-win-…`;
-- **готовый архив** `ucan-monitor-win.zip` с флешки или из сети.
+Последняя версия:
+[ucan-monitor-win.zip](https://github.com/alsizyakin/ucan-monitor-win/releases/latest/download/ucan-monitor-win.zip)
+(вход в GitHub не нужен). Можно и с флешки.
 
 Распаковать в любую папку, например на рабочий стол. Внутри должны быть
 папки `ucan-monitor\bin` и `ucan-monitor\assets`.
