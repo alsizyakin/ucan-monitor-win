@@ -77,6 +77,18 @@ are this branch.
 2. `bin\log.txt` after 10-15 minutes with adpt-bike on Windows, and whether
    the warnings and stops still happen.
 
+**2026-10-19: the owner reports the async-send build does not help**: the
+invalid VCU frames remain, and "errors pop up" (most likely the new
+`CAN, last 10 s` lines; log.txt not seen yet). Checked since: the RPDO1/RPDO2
+layouts of upstream (`adptbike_def.hpp`) and the firmware (`pdo_layouts.hpp`)
+match bit for bit, and upstream zeroes the reserved fields, so `is_valid()`
+holds; an invalid frame means a counter out of sequence (a frame lost,
+repeated or reordered on its way). Upstream `develop` unchanged (1a6b345).
+Asked for: log.txt of that run, what the errors were, and an A/B on the same
+bench — upstream's Linux build (SocketCAN), and our Linux build if the udev
+rule goes in. Next tool if needed: a CAN trace (send / adapter echo / receive,
+echo_id = sequence number) to see where a frame goes missing.
+
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
