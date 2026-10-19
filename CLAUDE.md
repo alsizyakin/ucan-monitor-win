@@ -77,25 +77,45 @@ are this branch.
 2. `bin\log.txt` after 10-15 minutes with adpt-bike on Windows, and whether
    the warnings and stops still happen.
 
-**2026-10-19: the owner reports the async-send build does not help**: the
-invalid VCU frames remain, and "errors pop up" (most likely the new
-`CAN, last 10 s` lines; log.txt not seen yet). Checked since: the RPDO1/RPDO2
-layouts of upstream (`adptbike_def.hpp`) and the firmware (`pdo_layouts.hpp`)
-match bit for bit, and upstream zeroes the reserved fields, so `is_valid()`
-holds; an invalid frame means a counter out of sequence (a frame lost,
-repeated or reordered on its way). Upstream `develop` unchanged (1a6b345).
-Asked for: log.txt of that run, what the errors were, and an A/B on the same
-bench — upstream's Linux build (SocketCAN), and our Linux build if the udev
-rule goes in. Next tool if needed: a CAN trace (send / adapter echo / receive,
-echo_id = sequence number) to see where a frame goes missing.
+**2026-10-19: the async-send build did not help.** The drive still raised
+"Некорректный кадр VCU" then "Потеря связи с VCU" (they clear, work goes on);
+on the same bench upstream's Linux build is clean. The log of that run
+(`~/Git/PC/ucan-monitor/logs/log.txt`): sent 7505, failed 0, dropped 0,
+received 27039, longest pause 36.3 ms, no `CAN, last 10 s` line at all. So
+every frame reached the adapter over USB; they go missing after it. The
+RPDO layouts of upstream and firmware match bit for bit and the reserved
+fields are zero, so an invalid frame is a counter out of sequence. Suspects:
+the adapter (firmware 2) dropping frames it took (the Linux driver numbers
+frames and keeps at most 10 un-echoed; we sent echo_id 0 and ignored
+echoes), or the bus (an error at the end of a frame can make a receiver take
+it twice).
+
+Added on the branch (`c3dd9ab`, `8fc4f9e`; Actions run 39277266608):
+running echo_id, echoes matched, a frame not echoed within 1 s counted as
+`unconfirmed by the adapter`, bus error frames counted, both in the log.txt
+lines; `bin/cantrace.on` turns on a CAN trace `bin/cantrace-*.csv`
+(S/E/M/F/D/R/X); `win/tools/analyze-trace.py <trace> --node 1` checks the
+RPDO counters as sent and as confirmed and puts each drive warning next to
+what happened in the second before.
+
+**The owner will bring next:** log.txt and `cantrace-*.csv` of a Windows run
+with adpt-bike until the warning shows. Read the CAN lines and run the
+analyzer: unconfirmed frames point at the adapter (then limit un-echoed
+frames as Linux does, below); bus errors or a clean confirmed stream
+with the warning still raised point at the bus or the drive.
 
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
   onto `main`, push `main` (the CI releases), delete the branch, remove this
   section;
+- `unconfirmed by the adapter` above 0 (M lines in the trace): the adapter
+  drops frames it took. Do as the Linux gs_usb driver: keep at most 10
+  frames un-echoed in the adapter, send the next only after an echo;
 - `failed` or `dropped` above 0: the USB path still loses frames; the error
   text says how;
+- `bus errors` above 0 (X lines): the bus itself; a counter repeated (not
+  skipped) in the drive's eyes fits double reception after an error;
 - a long `longest pause`: the uCANopen thread stalls. Candidates: Windows 11
   throttles the timer resolution of minimized or hidden windows (see
   `SetProcessInformation`, `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION`);
