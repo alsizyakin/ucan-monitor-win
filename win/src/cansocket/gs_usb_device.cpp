@@ -136,6 +136,11 @@ constexpr int rx_errors_to_give_up = 100;
 constexpr int tx_transfer_count = 8;
 // frames waiting for a transfer; SocketCAN queues 10 before it refuses
 constexpr size_t tx_queue_limit = 256;
+// a frame the adapter took but has not reported sent on the bus in this time
+// is counted as lost in the adapter
+constexpr std::chrono::seconds echo_timeout{1};
+// "no echo id" in the trace
+constexpr uint32_t no_echo_id = rx_echo_id;
 
 
 bool is_gs_usb(const libusb_device_descriptor& desc) {
@@ -260,6 +265,20 @@ std::expected<std::unique_ptr<GsUsbDevice>, Status> GsUsbDevice::open(size_t ind
     // Every early return below runs the destructor, which undoes what was done.
     std::unique_ptr<GsUsbDevice> dev(new GsUsbDevice);
     dev->_options = options;
+
+    if (!options.trace_file.empty()) {
+        dev->_trace_out.open(options.trace_file);
+        if (dev->_trace_out) {
+            // S sent by the program, E reported sent on the bus by the adapter,
+            // M no such report within 1 s, F lost in a failed USB transfer,
+            // D refused (send queue full), R received, X bus error
+            dev->_trace_out << "time_ms,event,echo_id,can_id,len,data\n";
+            dev->_trace_start = dev->_trace_flushed = Clock::now();
+            bsclog::info("CAN trace: writing {}.", options.trace_file.string());
+        } else {
+            bsclog::warning("CAN trace: cannot write {}.", options.trace_file.string());
+        }
+    }
 
     int error = libusb_init_context(&dev->_ctx, nullptr, 0);
     if (error != 0) {
@@ -407,7 +426,7 @@ Status GsUsbDevice::_start(uint32_t bitrate) {
         mode_flags |= feature_loop_back;
     }
     // newer firmware reports bus errors only when asked; older always does
-    if (_options.error_frames && (bt_const.feature & feature_berr_reporting)) {
+    if ((_options.error_frames || _trace_out.is_open()) && (bt_const.feature & feature_berr_reporting)) {
         mode_flags |= feature_berr_reporting;
     }
 
@@ -576,10 +595,11 @@ void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
         }
         HostFrame host_frame;
         std::memcpy(&host_frame, transfer->buffer, sizeof(host_frame));
-        if (host_frame.echo_id != rx_echo_id || host_frame.channel != channel) {
+        if (host_frame.channel != channel) {
             break;
         }
-        if ((host_frame.can_id & CAN_ERR_FLAG) && !_options.error_frames) {
+        if (host_frame.echo_id != rx_echo_id) {
+            _on_echo(host_frame.echo_id, Clock::now());
             break;
         }
         if (host_frame.flags & frame_flag_overflow) {
@@ -595,6 +615,19 @@ void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
         frame.can_id = host_frame.can_id;
         frame.len = std::min<uint8_t>(host_frame.can_dlc, CAN_MAX_DLEN);
         std::memcpy(frame.data, host_frame.data, CAN_MAX_DLEN);
+
+        if (frame.can_id & CAN_ERR_FLAG) {
+            {
+                std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+                ++_stats.bus_errors;
+            }
+            _trace('X', no_echo_id, frame);
+            if (!_options.error_frames) {
+                break;
+            }
+        } else {
+            _trace('R', no_echo_id, frame);
+        }
         {
             std::lock_guard<std::mutex> stats_lock(_stats_mtx);
             ++_stats.received;
@@ -656,23 +689,37 @@ Status GsUsbDevice::send(const can_frame& frame) {
     }
 
     HostFrame host_frame{};
-    host_frame.echo_id = 0;
     host_frame.can_id = frame.can_id;
     host_frame.can_dlc = std::min<uint8_t>(frame.len, CAN_MAX_DLEN);
     host_frame.channel = channel;
     std::memcpy(host_frame.data, frame.data, host_frame.can_dlc);
 
+    std::lock_guard<std::mutex> lock(_tx_mtx);
+    if (_tx_queue.size() >= tx_queue_limit) {
+        {
+            std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+            ++_stats.send_dropped;
+        }
+        _trace('D', no_echo_id, frame);
+        return Status::send_error;
+    }
+
+    // numbered, so that the adapter's echo of each frame can be matched
+    host_frame.echo_id = _next_echo_id++;
+    if (_next_echo_id == rx_echo_id) {
+        _next_echo_id = 0;
+    }
+
     TxFrame tx;
     static_assert(sizeof(host_frame) == std::tuple_size_v<decltype(tx.bytes)>);
     std::memcpy(tx.bytes.data(), &host_frame, sizeof(host_frame));
     tx.queued = Clock::now();
-
-    std::lock_guard<std::mutex> lock(_tx_mtx);
-    if (_tx_queue.size() >= tx_queue_limit) {
-        std::lock_guard<std::mutex> stats_lock(_stats_mtx);
-        ++_stats.send_dropped;
-        return Status::send_error;
+    {
+        std::lock_guard<std::mutex> echo_lock(_echo_mtx);
+        _pending.push_back(PendingEcho{.echo_id = host_frame.echo_id, .queued = tx.queued, .frame = frame});
     }
+    _trace('S', host_frame.echo_id, frame);
+
     _tx_queue.push_back(tx);
     _drain_tx();
     return Status::ok;
@@ -688,6 +735,9 @@ void GsUsbDevice::_drain_tx() {
         _tx_queue.pop_front();
         if (!_submit_tx(slot, frame)) {
             _tx_idle.push_back(slot); // the frame is counted as failed
+            uint32_t echo_id;
+            std::memcpy(&echo_id, frame.bytes.data(), sizeof(echo_id));
+            _mark_failed(echo_id);
         }
     }
     std::lock_guard<std::mutex> lock(_stats_mtx);
@@ -724,11 +774,16 @@ void GsUsbDevice::_on_tx(TxSlot* slot) {
         ++_stats.sent;
         _stats.max_send_time = std::max(_stats.max_send_time, time);
     } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
-        std::lock_guard<std::mutex> lock(_stats_mtx);
-        ++_stats.send_failed;
-        _stats.last_send_error = transfer->status == LIBUSB_TRANSFER_COMPLETED
-                ? std::format("short transfer ({} of {} bytes)", transfer->actual_length, transfer->length)
-                : transfer_status_text(transfer->status);
+        {
+            std::lock_guard<std::mutex> lock(_stats_mtx);
+            ++_stats.send_failed;
+            _stats.last_send_error = transfer->status == LIBUSB_TRANSFER_COMPLETED
+                    ? std::format("short transfer ({} of {} bytes)", transfer->actual_length, transfer->length)
+                    : transfer_status_text(transfer->status);
+        }
+        uint32_t echo_id;
+        std::memcpy(&echo_id, slot->frame.bytes.data(), sizeof(echo_id));
+        _mark_failed(echo_id);
     }
     if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE) {
         _mark_lost();
@@ -741,7 +796,82 @@ void GsUsbDevice::_on_tx(TxSlot* slot) {
 }
 
 
+void GsUsbDevice::_on_echo(uint32_t echo_id, Clock::time_point now) {
+    // Runs on the event thread.
+    std::lock_guard<std::mutex> lock(_echo_mtx);
+    const auto it = std::ranges::find(_pending, echo_id, &PendingEcho::echo_id);
+    if (it != _pending.end() && !it->confirmed) {
+        it->confirmed = true;
+        {
+            std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+            ++_stats.confirmed;
+        }
+        _trace('E', echo_id, it->frame);
+    } else {
+        // an echo of a frame given up on, or a second echo
+        _trace('E', echo_id, can_frame{});
+    }
+    _expire_echoes(now);
+}
+
+
+void GsUsbDevice::_expire_echoes(Clock::time_point now) {
+    // with _echo_mtx held
+    while (!_pending.empty()) {
+        const PendingEcho& front = _pending.front();
+        if (!front.confirmed && !front.failed) {
+            if (now - front.queued < echo_timeout) {
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+                ++_stats.unconfirmed;
+            }
+            _trace('M', front.echo_id, front.frame);
+        }
+        _pending.pop_front();
+    }
+}
+
+
+void GsUsbDevice::_mark_failed(uint32_t echo_id) {
+    // with _echo_mtx not held
+    std::lock_guard<std::mutex> lock(_echo_mtx);
+    const auto it = std::ranges::find(_pending, echo_id, &PendingEcho::echo_id);
+    if (it != _pending.end()) {
+        it->failed = true;
+        _trace('F', echo_id, it->frame);
+    }
+}
+
+
+void GsUsbDevice::_trace(char event, uint32_t echo_id, const can_frame& frame) {
+    if (!_trace_out.is_open()) {
+        return;
+    }
+    const auto now = Clock::now();
+    std::string data;
+    for (unsigned i = 0; i < std::min<unsigned>(frame.len, CAN_MAX_DLEN); ++i) {
+        data += std::format("{:02X}", frame.data[i]);
+    }
+    const std::string echo = echo_id == no_echo_id ? std::string{} : std::to_string(echo_id);
+
+    std::lock_guard<std::mutex> lock(_trace_mtx);
+    _trace_out << std::format("{:.3f},{},{},{:X},{},{}\n",
+                              std::chrono::duration<double, std::milli>(now - _trace_start).count(),
+                              event, echo, frame.can_id, frame.len, data);
+    if (now - _trace_flushed >= std::chrono::seconds(1)) {
+        _trace_out.flush();
+        _trace_flushed = now;
+    }
+}
+
+
 GsUsbDevice::Stats GsUsbDevice::take_stats() {
+    {
+        std::lock_guard<std::mutex> lock(_echo_mtx);
+        _expire_echoes(Clock::now());
+    }
     std::lock_guard<std::mutex> lock(_stats_mtx);
     return std::exchange(_stats, Stats{});
 }

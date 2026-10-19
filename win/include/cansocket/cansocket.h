@@ -77,10 +77,12 @@ private:
         std::chrono::microseconds max_pause{0}; // between recv() calls, this period
         std::chrono::microseconds max_pause_total{0};
         uint64_t sent{0};
+        uint64_t unconfirmed{0};
         uint64_t send_failed{0};
         uint64_t send_dropped{0};
         uint64_t received{0};
         uint64_t receive_dropped{0};
+        uint64_t bus_errors{0};
     };
     Diagnostics _diag;
     void _report(bool final);
