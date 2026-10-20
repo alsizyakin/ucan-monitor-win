@@ -93,7 +93,23 @@ constexpr uint32_t mode_start = 1;
 // bits of BtConst::feature, and of DeviceMode::flags to use them
 constexpr uint32_t feature_listen_only = 1 << 0;
 constexpr uint32_t feature_loop_back = 1 << 1;
+constexpr uint32_t feature_pad_packets = 1 << 7;
 constexpr uint32_t feature_berr_reporting = 1 << 12;
+
+std::string feature_text(uint32_t features) {
+    static const char* const names[] = {
+        "listen-only", "loop-back", "triple-sample", "one-shot", "hw-timestamp", "identify",
+        "user-id", "pad-packets", "fd", "lpc546xx-quirk", "bt-const-ext", "termination",
+        "berr-reporting", "get-state",
+    };
+    std::string list;
+    for (unsigned bit = 0; bit < std::size(names); ++bit) {
+        if (features & (1u << bit)) {
+            list += (list.empty() ? "" : ", ") + std::string(names[bit]);
+        }
+    }
+    return list.empty() ? std::format("0x{:X}", features) : std::format("0x{:X} ({})", features, list);
+}
 
 // A classic CAN frame on the bulk endpoints
 struct HostFrame {
@@ -128,7 +144,8 @@ constexpr uint8_t request_type_in = static_cast<uint8_t>(LIBUSB_ENDPOINT_IN)
 
 constexpr uint16_t channel = 0;
 constexpr unsigned control_timeout_ms = 1000;
-constexpr int rx_transfer_count = 16;
+// receive transfers waiting at once, as many as the Linux gs_usb driver keeps
+constexpr int rx_transfer_count = 32;
 constexpr size_t queue_limit = 10000;
 constexpr int rx_errors_to_give_up = 100;
 // frames in USB transfers at once, as many as the Linux gs_usb driver keeps
@@ -139,6 +156,9 @@ constexpr size_t tx_queue_limit = 256;
 // a frame the adapter took but has not reported sent on the bus in this time
 // is counted as lost in the adapter
 constexpr std::chrono::seconds echo_timeout{1};
+// for tx_in_flight, a frame not echoed in this time no longer holds a place,
+// so a lost echo delays sending at most this long
+constexpr std::chrono::milliseconds flow_timeout{50};
 // "no echo id" in the trace
 constexpr uint32_t no_echo_id = rx_echo_id;
 
@@ -343,7 +363,10 @@ std::expected<std::unique_ptr<GsUsbDevice>, Status> GsUsbDevice::open(size_t ind
                     dev->_interface = desc.bInterfaceNumber;
                     dev->_ep_in = ep_in;
                     dev->_ep_out = ep_out;
-                    dev->_rx_buf_size = std::max(in_size, 64);
+                    // one packet per transfer: whole packets, enough for a frame
+                    const int packet = std::max(in_size, 1);
+                    const int frame_size = static_cast<int>(sizeof(HostFrame));
+                    dev->_rx_buf_size = (frame_size + packet - 1) / packet * packet;
                 }
             }
         }
@@ -381,6 +404,21 @@ std::expected<std::unique_ptr<GsUsbDevice>, Status> GsUsbDevice::open(size_t ind
     }
     dev->_claimed = true;
 
+#if defined(LIBUSB_API_VERSION) && LIBUSB_API_VERSION >= 0x0100010C
+    // WinUSB otherwise queues the receive transfers and passes them to the USB
+    // stack one by one; the adapter's buffers then fill up under load
+    if (options.raw_io && libusb_endpoint_supports_raw_io(dev->_handle, dev->_ep_in) == 1) {
+        const int max_size = libusb_get_max_raw_io_transfer_size(dev->_handle, dev->_ep_in);
+        error = max_size >= dev->_rx_buf_size ? libusb_endpoint_set_raw_io(dev->_handle, dev->_ep_in, 1)
+                                              : LIBUSB_ERROR_INVALID_PARAM;
+        if (error == 0) {
+            bsclog::info("candleLight: RAW_IO on for receiving.");
+        } else {
+            bsclog::warning("candleLight: cannot turn RAW_IO on: {}.", error_text(error));
+        }
+    }
+#endif
+
     const Status status = dev->_start(bitrate);
     if (status != Status::ok) {
         return std::unexpected(status);
@@ -410,7 +448,21 @@ Status GsUsbDevice::_start(uint32_t bitrate) {
         return Status::socketcan_init_failed;
     }
 
+    // the features tell roughly how old the firmware is: newer adds more
+    bsclog::info("candleLight: features {}.", feature_text(bt_const.feature));
+
     uint32_t mode_flags = 0;
+    if (_options.pad_packets) {
+        if (bt_const.feature & feature_pad_packets) {
+            mode_flags |= feature_pad_packets;
+        } else {
+            bsclog::warning("candleLight: the adapter cannot pad packets.");
+        }
+    }
+    bsclog::info("candleLight: at most {} frames in the adapter not reported sent, receive buffer {} bytes, "
+                 "padding {}.",
+                 _options.tx_in_flight == 0 ? std::string("any number of") : std::to_string(_options.tx_in_flight),
+                 _rx_buf_size, (mode_flags & feature_pad_packets) ? "on" : "off");
     if (_options.listen_only) {
         if (!(bt_const.feature & feature_listen_only)) {
             bsclog::error("The adapter cannot listen only.");
@@ -727,8 +779,14 @@ Status GsUsbDevice::send(const can_frame& frame) {
 
 
 void GsUsbDevice::_drain_tx() {
-    // with _tx_mtx held: the queue goes into idle transfers, in order
-    while (!_tx_idle.empty() && !_tx_queue.empty() && !_stopping && !_lost) {
+    // with _tx_mtx held: the queue goes into idle transfers, in order, while
+    // the adapter holds fewer than tx_in_flight frames not echoed yet
+    const auto now = Clock::now();
+    while (!_in_adapter.empty() && now - _in_adapter.front().second >= flow_timeout) {
+        _in_adapter.pop_front(); // its echo is lost or late: do not wait for it
+    }
+    while (!_tx_idle.empty() && !_tx_queue.empty() && !_stopping && !_lost
+           && (_options.tx_in_flight == 0 || _in_adapter.size() < _options.tx_in_flight)) {
         TxSlot* slot = _tx_idle.back();
         _tx_idle.pop_back();
         const TxFrame frame = _tx_queue.front();
@@ -761,6 +819,9 @@ bool GsUsbDevice::_submit_tx(TxSlot* slot, const TxFrame& frame) {
         return false;
     }
     ++_tx_active;
+    uint32_t echo_id;
+    std::memcpy(&echo_id, frame.bytes.data(), sizeof(echo_id));
+    _in_adapter.emplace_back(echo_id, Clock::now());
     return true;
 }
 
@@ -791,6 +852,12 @@ void GsUsbDevice::_on_tx(TxSlot* slot) {
 
     std::lock_guard<std::mutex> lock(_tx_mtx);
     --_tx_active;
+    if (transfer->status != LIBUSB_TRANSFER_COMPLETED || transfer->actual_length != transfer->length) {
+        // the adapter never got it: it holds no place
+        uint32_t echo_id;
+        std::memcpy(&echo_id, slot->frame.bytes.data(), sizeof(echo_id));
+        std::erase_if(_in_adapter, [echo_id](const auto& entry) { return entry.first == echo_id; });
+    }
     _tx_idle.push_back(slot);
     _drain_tx();
 }
@@ -798,6 +865,13 @@ void GsUsbDevice::_on_tx(TxSlot* slot) {
 
 void GsUsbDevice::_on_echo(uint32_t echo_id, Clock::time_point now) {
     // Runs on the event thread.
+    {
+        // the frame has left the adapter: room for the next
+        std::lock_guard<std::mutex> lock(_tx_mtx);
+        std::erase_if(_in_adapter, [echo_id](const auto& entry) { return entry.first == echo_id; });
+        _drain_tx();
+    }
+
     std::lock_guard<std::mutex> lock(_echo_mtx);
     const auto it = std::ranges::find(_pending, echo_id, &PendingEcho::echo_id);
     if (it != _pending.end() && !it->confirmed) {

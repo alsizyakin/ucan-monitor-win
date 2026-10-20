@@ -44,6 +44,15 @@ public:
         // write every frame sent, confirmed by the adapter and received, and
         // the bus errors, to this CSV file; empty: no trace
         std::filesystem::path trace_file;
+        // at most this many frames in the adapter not yet reported sent, as
+        // the Linux gs_usb driver keeps (10); 0: no limit
+        unsigned tx_in_flight{10};
+        // Windows: let WinUSB pass the receive transfers straight to the USB
+        // stack instead of queueing them one by one (RAW_IO, libusb 1.0.30)
+        bool raw_io{true};
+        // have the adapter pad every frame to the endpoint's packet size;
+        // the candleLight authors found it helps with WinUSB
+        bool pad_packets{false};
     };
 
     // Descriptions of the gs_usb adapters on USB, in the order open() counts them.
@@ -155,6 +164,8 @@ private:
     std::atomic<int> _tx_active{0};
 
     uint32_t _next_echo_id{0}; // under _tx_mtx
+    // frames in the adapter not yet echoed, for tx_in_flight; under _tx_mtx
+    std::deque<std::pair<uint32_t, Clock::time_point>> _in_adapter;
 
     std::mutex _echo_mtx;
     std::deque<PendingEcho> _pending;

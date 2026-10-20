@@ -21,6 +21,42 @@ const std::filesystem::path settings_file = "cansocket.cfg";
 // adapter, each frame received and each bus error.
 const std::filesystem::path trace_flag = "cantrace.on";
 
+// Optional settings of the adapter link, one per line, as in candle-test:
+//   tx_in_flight=10   frames in the adapter not reported sent, at most (0: any)
+//   raw_io=1          RAW_IO for receiving on Windows
+//   pad_packets=0     the adapter pads its packets
+const std::filesystem::path options_file = "candle.cfg";
+
+void read_options(detail::GsUsbDevice::Options& options) {
+    std::ifstream file(options_file);
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto eq = line.find('=');
+        if (line.empty() || line[0] == '#' || eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = line.substr(0, eq);
+        unsigned long value = 0;
+        try {
+            value = std::stoul(line.substr(eq + 1));
+        } catch (const std::exception&) {
+            bsclog::warning("{}: bad value in '{}'.", options_file.string(), line);
+            continue;
+        }
+        if (key == "tx_in_flight") {
+            options.tx_in_flight = static_cast<unsigned>(value);
+        } else if (key == "raw_io") {
+            options.raw_io = value != 0;
+        } else if (key == "pad_packets") {
+            options.pad_packets = value != 0;
+        } else {
+            bsclog::warning("{}: unknown setting '{}'.", options_file.string(), key);
+            continue;
+        }
+        bsclog::info("{}: {}.", options_file.string(), line);
+    }
+}
+
 std::filesystem::path trace_file_name() {
     const std::time_t now = std::time(nullptr);
     std::tm local{};
@@ -45,6 +81,8 @@ double ms(std::chrono::microseconds us) { return us.count() / 1000.0; }
 
 
 Socket::Socket() {
+    bsclog::info("uCAN Monitor for Windows {}, upstream {}.", UCAN_WIN_VERSION, UCAN_UPSTREAM_VERSION);
+
     std::ifstream file(settings_file);
     std::string interface;
     std::string bitrate;
@@ -83,6 +121,7 @@ Status Socket::connect(const std::string& interface, const std::string& bitrate)
     bsclog::info("Opening {} at {} bit/s...", interface, bitrate);
     const auto index = static_cast<size_t>(interface_it - detail::interface_list.begin());
     detail::GsUsbDevice::Options options;
+    read_options(options);
     if (std::filesystem::exists(trace_flag)) {
         options.trace_file = trace_file_name();
     }

@@ -3,6 +3,7 @@
 //   candle-test -l                  list the adapters on USB
 //   candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]
 //               [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]
+//               [-f 10] [-r 0|1] [-P]
 //
 // Opens the adapter, prints the frames and the bus errors received for -t
 // seconds (0: until Ctrl+C) and, with -s, sends a frame every -p ms (1000 by
@@ -16,6 +17,8 @@
 // -c: data bytes 0-3 carry a frame number; in loopback the numbers that come
 // back are checked for losses and order, and the round trip is timed.
 // -w: write every frame sent, confirmed by the adapter and received to a CSV.
+// -f: at most this many frames in the adapter not reported sent (0: any);
+// -r: RAW_IO for receiving on Windows; -P: the adapter pads its packets.
 
 #include "../src/cansocket/gs_usb_device.h"
 
@@ -40,7 +43,8 @@ std::atomic<bool> interrupted{false};
 void usage() {
     std::cerr << "usage: candle-test -l\n"
                  "       candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]\n"
-                 "                   [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]\n";
+                 "                   [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]\n"
+                 "                   [-f 10] [-r 0|1] [-P]\n";
 }
 
 std::optional<can_frame> parse_frame(const std::string& text) {
@@ -190,6 +194,12 @@ int main(int argc, char** argv) {
                     usage();
                     return 2;
                 }
+            } else if (arg == "-f" && has_value) {
+                options.tx_in_flight = static_cast<unsigned>(std::stoul(argv[++i]));
+            } else if (arg == "-r" && has_value) {
+                options.raw_io = std::stoul(argv[++i]) != 0;
+            } else if (arg == "-P") {
+                options.pad_packets = true;
             } else if (arg == "-w" && has_value) {
                 options.trace_file = argv[++i];
             } else if (arg == "-c") {
@@ -219,6 +229,7 @@ int main(int argc, char** argv) {
         tx_frame->len = 4; // room for the number
     }
 
+    std::cout << "candle-test " UCAN_WIN_VERSION ".\n";
     auto device = can::detail::GsUsbDevice::open(index, bitrate, options);
     if (!device) {
         return 1;

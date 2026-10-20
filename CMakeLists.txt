@@ -71,6 +71,22 @@ if(WIN32)
     target_link_libraries(candle PUBLIC winmm) # timeBeginPeriod()
 endif()
 
+# The commits of this repository and of upstream, for the first line of the
+# log; configuring again after a commit here updates them.
+execute_process(COMMAND git -C ${PROJECT_SOURCE_DIR} rev-parse --short=7 HEAD
+    OUTPUT_VARIABLE win_version OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git -C ${upstream_dir} rev-parse --short=7 HEAD
+    OUTPUT_VARIABLE upstream_version OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git -C ${PROJECT_SOURCE_DIR} rev-parse --git-path HEAD
+    OUTPUT_VARIABLE git_head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(git_head)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/${git_head})
+endif()
+target_compile_definitions(candle PUBLIC
+    UCAN_WIN_VERSION="${win_version}"
+    UCAN_UPSTREAM_VERSION="${upstream_version}"
+)
+
 ################################################################################
 # Sources: all of upstream except its SocketCAN backend, which candle replaces
 file(GLOB_RECURSE app_sources CONFIGURE_DEPENDS
