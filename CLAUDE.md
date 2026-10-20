@@ -98,11 +98,33 @@ lines; `bin/cantrace.on` turns on a CAN trace `bin/cantrace-*.csv`
 RPDO counters as sent and as confirmed and puts each drive warning next to
 what happened in the second before.
 
-**The owner will bring next:** log.txt and `cantrace-*.csv` of a Windows run
-with adpt-bike until the warning shows. Read the CAN lines and run the
-analyzer: unconfirmed frames point at the adapter (then limit un-echoed
-frames as Linux does, below); bus errors or a clean confirmed stream
-with the warning still raised point at the bus or the drive.
+**2026-10-20, trace build on Windows** (logs `~/Git/PC/ucan-monitor/logs/log (2).txt`,
+`log (3).txt`): the drive now loses the VCU link all the time. Each 10 s:
+~1120 sent, `unconfirmed by the adapter` 9-12, at times ~100; failed 0,
+dropped 0, bus errors 0, longest send 1.6 ms, longest pause 0.8 ms; received
+~3070 (as expected). So the adapter takes frames over USB and loses them;
+the pool is not exhausted (sends would wait). candleLight firmware always
+reports "firmware 2"; v2.0 (2022, the last release) waits rather than drops
+when out of buffers and ignores echo_id; master 2024-01..2026-01 has bugs on
+this very path (7fba5612 frames from the host into a wrong buffer, f418aa36
+lost messages to the host; fixed by d97f265e, 0080001f, PR 209/223), and
+sellers flash master. The async build (8 OUT transfers back to back) was
+worse than the sync one, which fits a race in the adapter.
+
+Branch `async-send` `0fa7851` (run 39425363678), done as the Linux driver
+does: 32 receive transfers of whole packets with WinUSB RAW_IO (libusb
+1.0.30 in MSYS2; guarded off for 1.0.29 on Linux); at most 10 frames in the
+adapter un-echoed (50 ms reclaim); features logged (firmware age); first log
+line names the commits. Switches: `bin/candle.cfg` (`tx_in_flight=`,
+`raw_io=`, `pad_packets=`) and `candle-test -f N -r 0|1 -P`.
+
+**Asked of the owner:** the load self-test on Windows (no drive) in several
+settings, then the drive with the best one:
+`candle-test -m loopback -b 500000 -s 123#0000000000000000 -c -p 1 -t 20`
+with `-f 10` (default), `-f 1`, `-r 0`, `-P`; the same on Linux with sudo
+for comparison; then the GUI with adpt-bike and log.txt. If losses stay on
+every setting, the adapter firmware is the likely culprit: flashing current
+candleLight master (DFU) would tell.
 
 **Reading them:**
 
