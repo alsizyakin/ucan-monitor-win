@@ -137,6 +137,20 @@ Windows from our protocol / the firmware), the new build's log.txt (first
 line `uCAN Monitor for Windows 307b9b9`), a trace with the drive, and
 whether Linux was tested with the very same adapter.
 
+**2026-10-23, data from `307b9b9`** (`logs/selftest.txt`, `logs/log (5).txt`):
+the adapter reports features 0xFB (v2.0 is 0xF3; one-shot added after v2.0,
+user-id dropped 2022-11-14): mid-2022 firmware, v2.0-like paths. Loopback
+load test, 20 000 frames each: default (10 in flight, RAW_IO) lost 1;
+`-f 1` lost 0; `-f 0 -r 0` lost 9; `-P` lost 35; unconfirmed = lost, so a
+frame vanishes inside the adapter before CAN. GUI with the drive (default
+settings, but the wrong server: adpt-etk-inverter on the adpt-bike drive,
+hence SDO aborts): unconfirmed 697 of 6249 (11 %), bus errors 47. Reading:
+v2.0's to-host path cannot drop; the double-buffered USB OUT receive can
+lose a packet arriving right behind another, and the GUI sends in bursts
+(SYNC, RPDOs, SDO in one turn) while ~300 frames/s come from the bus.
+Next: GUI on adpt-bike (right server) with `bin/candle.cfg` `tx_in_flight=1`;
+if clean, make 1 the default and release.
+
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
