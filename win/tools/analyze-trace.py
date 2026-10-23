@@ -20,6 +20,7 @@ import statistics
 
 EVENTS = {
     "S": "sent by the program",
+    "A": "sent again, the adapter lost it",
     "E": "confirmed by the adapter",
     "M": "never confirmed by the adapter",
     "F": "lost in a failed USB transfer",

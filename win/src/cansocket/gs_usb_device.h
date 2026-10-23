@@ -44,9 +44,15 @@ public:
         // write every frame sent, confirmed by the adapter and received, and
         // the bus errors, to this CSV file; empty: no trace
         std::filesystem::path trace_file;
-        // at most this many frames in the adapter not yet reported sent, as
-        // the Linux gs_usb driver keeps (10); 0: no limit
-        unsigned tx_in_flight{10};
+        // at most this many frames in the adapter not yet reported sent; 0: no
+        // limit. The Linux gs_usb driver keeps 10, but candleLight firmware of
+        // 2022 loses a frame that reaches it right behind another: 1 sends
+        // each frame only once the one before is reported sent.
+        unsigned tx_in_flight{1};
+        // with tx_in_flight 1: a frame the adapter took but did not report
+        // sent within 10 ms is sent again, at most twice; it never reached
+        // the CAN controller, so the counters in it stay in sequence
+        bool resend{true};
         // Windows: let WinUSB pass the receive transfers straight to the USB
         // stack instead of queueing them one by one (RAW_IO, libusb 1.0.30)
         bool raw_io{true};
@@ -82,6 +88,8 @@ public:
         uint64_t sent{0};          // taken by the adapter over USB
         uint64_t confirmed{0};     // reported by the adapter as sent on the bus
         uint64_t unconfirmed{0};   // taken, but not reported sent within 1 s
+        uint64_t resent{0};        // sent again, not reported sent in 10 ms
+        uint64_t late_echoes{0};   // reported sent once more: a frame on the bus twice
         uint64_t send_failed{0};   // lost in a failed USB transfer
         uint64_t send_dropped{0};  // refused: the send queue was full
         std::string last_send_error;
@@ -129,7 +137,8 @@ private:
     void _expire_echoes(Clock::time_point now);
     void _mark_failed(uint32_t echo_id);
     void _trace(char event, uint32_t echo_id, const can_frame& frame);
-    bool _submit_tx(TxSlot* slot, const TxFrame& frame);
+    bool _submit_tx(TxSlot* slot, const TxFrame& frame, bool track = true);
+    void _check_in_adapter(Clock::time_point now);
     void _mark_lost();
     void _run_events();
 
@@ -164,8 +173,15 @@ private:
     std::atomic<int> _tx_active{0};
 
     uint32_t _next_echo_id{0}; // under _tx_mtx
-    // frames in the adapter not yet echoed, for tx_in_flight; under _tx_mtx
-    std::deque<std::pair<uint32_t, Clock::time_point>> _in_adapter;
+    // a frame in the adapter not yet echoed, for tx_in_flight and resending
+    struct InAdapter {
+        uint32_t echo_id{0};
+        Clock::time_point since; // submitted, or taken by the adapter
+        bool taken{false};       // its USB transfer completed
+        unsigned resends{0};
+        TxFrame frame;
+    };
+    std::deque<InAdapter> _in_adapter; // under _tx_mtx
 
     std::mutex _echo_mtx;
     std::deque<PendingEcho> _pending;

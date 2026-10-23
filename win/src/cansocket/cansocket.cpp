@@ -22,7 +22,8 @@ const std::filesystem::path settings_file = "cansocket.cfg";
 const std::filesystem::path trace_flag = "cantrace.on";
 
 // Optional settings of the adapter link, one per line, as in candle-test:
-//   tx_in_flight=10   frames in the adapter not reported sent, at most (0: any)
+//   tx_in_flight=1    frames in the adapter not reported sent, at most (0: any)
+//   resend=1          with tx_in_flight=1, send again what the adapter lost
 //   raw_io=1          RAW_IO for receiving on Windows
 //   pad_packets=0     the adapter pads its packets
 const std::filesystem::path options_file = "candle.cfg";
@@ -45,6 +46,8 @@ void read_options(detail::GsUsbDevice::Options& options) {
         }
         if (key == "tx_in_flight") {
             options.tx_in_flight = static_cast<unsigned>(value);
+        } else if (key == "resend") {
+            options.resend = value != 0;
         } else if (key == "raw_io") {
             options.raw_io = value != 0;
         } else if (key == "pad_packets") {
@@ -204,6 +207,8 @@ void Socket::_report(bool final) {
     const auto stats = _device->take_stats();
     _diag.sent += stats.sent;
     _diag.unconfirmed += stats.unconfirmed;
+    _diag.resent += stats.resent;
+    _diag.late_echoes += stats.late_echoes;
     _diag.send_failed += stats.send_failed;
     _diag.send_dropped += stats.send_dropped;
     _diag.received += stats.received;
@@ -211,27 +216,33 @@ void Socket::_report(bool final) {
     _diag.bus_errors += stats.bus_errors;
     _diag.max_pause_total = std::max(_diag.max_pause_total, _diag.max_pause);
 
-    const bool trouble = stats.unconfirmed > 0 || stats.send_failed > 0 || stats.send_dropped > 0
+    const bool trouble = stats.unconfirmed > 0 || stats.resent > 0 || stats.late_echoes > 0
+                      || stats.send_failed > 0 || stats.send_dropped > 0
                       || stats.receive_dropped > 0 || stats.bus_errors > 0
                       || stats.adapter_overflows > 0 || stats.max_send_time >= slow_send
                       || _diag.max_pause >= long_pause;
     if (trouble) {
-        // unconfirmed: taken by the adapter over USB, but never reported sent
-        bsclog::warning("CAN, last {} s: sent {}, unconfirmed by the adapter {}, failed {}{}, dropped {}, "
-                        "longest send {:.1f} ms, longest send queue {}; received {}, dropped {}, "
-                        "adapter overflows {}, bus errors {}; longest pause of the uCANopen thread {:.1f} ms.",
+        // resent: the adapter lost it, sent again; unconfirmed: taken by the
+        // adapter over USB, but never reported sent; late echoes: a frame
+        // reported sent twice, so on the bus twice
+        bsclog::warning("CAN, last {} s: sent {}, resent {}, unconfirmed by the adapter {}, late echoes {}, "
+                        "failed {}{}, dropped {}, longest send {:.1f} ms, longest send queue {}; received {}, "
+                        "dropped {}, adapter overflows {}, bus errors {}; "
+                        "longest pause of the uCANopen thread {:.1f} ms.",
                         std::chrono::duration_cast<std::chrono::seconds>(
                                 std::chrono::steady_clock::now() - _diag.period_start).count(),
-                        stats.sent, stats.unconfirmed, stats.send_failed,
+                        stats.sent, stats.resent, stats.unconfirmed, stats.late_echoes, stats.send_failed,
                         stats.last_send_error.empty() ? "" : " (" + stats.last_send_error + ")",
                         stats.send_dropped, ms(stats.max_send_time), stats.max_send_queue,
                         stats.received, stats.receive_dropped, stats.adapter_overflows, stats.bus_errors,
                         ms(_diag.max_pause));
     }
     if (final) {
-        bsclog::info("CAN in this connection: sent {}, unconfirmed by the adapter {}, failed {}, dropped {}; "
-                     "received {}, dropped {}, bus errors {}; longest pause of the uCANopen thread {:.1f} ms.",
-                     _diag.sent, _diag.unconfirmed, _diag.send_failed, _diag.send_dropped,
+        bsclog::info("CAN in this connection: sent {}, resent {}, unconfirmed by the adapter {}, late echoes {}, "
+                     "failed {}, dropped {}; received {}, dropped {}, bus errors {}; "
+                     "longest pause of the uCANopen thread {:.1f} ms.",
+                     _diag.sent, _diag.resent, _diag.unconfirmed, _diag.late_echoes, _diag.send_failed,
+                     _diag.send_dropped,
                      _diag.received, _diag.receive_dropped, _diag.bus_errors, ms(_diag.max_pause_total));
     }
 

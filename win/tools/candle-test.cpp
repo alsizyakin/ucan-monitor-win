@@ -3,7 +3,7 @@
 //   candle-test -l                  list the adapters on USB
 //   candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]
 //               [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]
-//               [-f 10] [-r 0|1] [-P]
+//               [-f 1] [-R 0|1] [-r 0|1] [-P]
 //
 // Opens the adapter, prints the frames and the bus errors received for -t
 // seconds (0: until Ctrl+C) and, with -s, sends a frame every -p ms (1000 by
@@ -18,7 +18,8 @@
 // back are checked for losses and order, and the round trip is timed.
 // -w: write every frame sent, confirmed by the adapter and received to a CSV.
 // -f: at most this many frames in the adapter not reported sent (0: any);
-// -r: RAW_IO for receiving on Windows; -P: the adapter pads its packets.
+// -R: with -f 1, send again what the adapter lost; -r: RAW_IO for receiving
+// on Windows; -P: the adapter pads its packets.
 
 #include "../src/cansocket/gs_usb_device.h"
 
@@ -44,7 +45,7 @@ void usage() {
     std::cerr << "usage: candle-test -l\n"
                  "       candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]\n"
                  "                   [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]\n"
-                 "                   [-f 10] [-r 0|1] [-P]\n";
+                 "                   [-f 1] [-R 0|1] [-r 0|1] [-P]\n";
 }
 
 std::optional<can_frame> parse_frame(const std::string& text) {
@@ -196,6 +197,8 @@ int main(int argc, char** argv) {
                 }
             } else if (arg == "-f" && has_value) {
                 options.tx_in_flight = static_cast<unsigned>(std::stoul(argv[++i]));
+            } else if (arg == "-R" && has_value) {
+                options.resend = std::stoul(argv[++i]) != 0;
             } else if (arg == "-r" && has_value) {
                 options.raw_io = std::stoul(argv[++i]) != 0;
             } else if (arg == "-P") {
@@ -379,10 +382,11 @@ int main(int argc, char** argv) {
                                  max_round_trip.count() / 1000.0);
     }
     const auto stats = dev.take_stats();
-    std::cout << std::format("USB: sent {}, confirmed by the adapter {}, unconfirmed {}, failed {}{}, dropped {}, "
-                             "longest send {:.2f} ms, longest send queue {}; "
+    std::cout << std::format("USB: sent {}, confirmed by the adapter {}, resent {}, unconfirmed {}, late echoes {}, "
+                             "failed {}{}, dropped {}, longest send {:.2f} ms, longest send queue {}; "
                              "received {}, dropped {}, adapter overflows {}, bus errors {}.\n",
-                             stats.sent, stats.confirmed, stats.unconfirmed, stats.send_failed,
+                             stats.sent, stats.confirmed, stats.resent, stats.unconfirmed, stats.late_echoes,
+                             stats.send_failed,
                              stats.last_send_error.empty() ? "" : " (" + stats.last_send_error + ")",
                              stats.send_dropped, stats.max_send_time.count() / 1000.0, stats.max_send_queue,
                              stats.received, stats.receive_dropped, stats.adapter_overflows, stats.bus_errors);

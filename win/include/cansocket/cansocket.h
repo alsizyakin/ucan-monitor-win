@@ -78,6 +78,8 @@ private:
         std::chrono::microseconds max_pause_total{0};
         uint64_t sent{0};
         uint64_t unconfirmed{0};
+        uint64_t resent{0};
+        uint64_t late_echoes{0};
         uint64_t send_failed{0};
         uint64_t send_dropped{0};
         uint64_t received{0};
