@@ -167,6 +167,24 @@ wakes every 5 ms. selftest.cmd now: default, `-R 0`, `-f 10`, `-f 0 -r 0`.
 If the owner sees resent > 0, unconfirmed 0, late echoes 0 and no drive
 warnings: merge to main (release).
 
+**2026-10-23, `log(7).txt`** (307b9b9, tx_in_flight=1, no resend; watch
+period switched from 10 ms to 1 ms): at 1 ms the queue grew (27), then
+unconfirmed 292 and refused 2448 in 10 s, then sent 0 for good while still
+receiving: the adapter stopped taking frames (candleLight #207's symptom).
+The 50 ms flow reclaim kept adding frames while earlier ones waited in the
+adapter, until its 64 buffers ran out; the Linux driver never has over 10
+out. `97608d8`: a hard limit of 8 un-echoed frames in the adapter, given
+up ones included for 2 s; one at a time while it keeps up, up to 4 when a
+frame waited 2 ms; resend with any window, frames of an id wait while one
+of it may be resent. candle-test `-n K` bursts with ids counting up;
+loopback check by time, per-id order and duplicates.
+
+Firmware route if software is not enough: prebuilt master binaries are the
+artifacts of candleLight_fw's CI; flash with
+`dfu-util -D <fw>.bin -a 0 -s 0x08000000:leave`; the board must be known
+(candleLight, CANable-MKS 1.0, DSD TECH SH-C30A, FYSETC UCAN... all F072,
+different pins), and every colleague's adapter would need it.
+
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
