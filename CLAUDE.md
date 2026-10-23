@@ -151,6 +151,22 @@ lose a packet arriving right behind another, and the GUI sends in bursts
 Next: GUI on adpt-bike (right server) with `bin/candle.cfg` `tx_in_flight=1`;
 if clean, make 1 the default and release.
 
+**2026-10-23, `log(6).txt`** (candle.cfg `tx_in_flight=1`; server
+adpt-etk-inverter, which sends the same RPDO1/RPDO2 as adpt-bike — layouts,
+periods and builders are identical, only the SDO watch list differs):
+unconfirmed 54 of 13 667 (0.4 %, was 11 %); every loss stalled sending 50 ms
+(longest send 45-105 ms); bus errors 852 in ~2 min (0 on 2026-10-20): ask if
+the motor ran, and compare with Linux `ip -details -statistics link show can0`
+after a session with upstream. The drive: an invalid frame now and then, no
+link loss.
+
+`cc7da9e` on the branch: tx_in_flight=1 by default, and a frame taken by the
+adapter but not echoed in 10 ms is sent again (at most twice; same echo_id;
+a second echo counts as `late echoes`, i.e. on the bus twice); event thread
+wakes every 5 ms. selftest.cmd now: default, `-R 0`, `-f 10`, `-f 0 -r 0`.
+If the owner sees resent > 0, unconfirmed 0, late echoes 0 and no drive
+warnings: merge to main (release).
+
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
