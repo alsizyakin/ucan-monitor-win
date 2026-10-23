@@ -126,6 +126,17 @@ for comparison; then the GUI with adpt-bike and log.txt. If losses stay on
 every setting, the adapter firmware is the likely culprit: flashing current
 candleLight master (DFU) would tell.
 
+**2026-10-23:** the owner says the problem stays with `0fa7851`, but the log
+brought (`log (4).txt`) is a byte copy of `log (3).txt`, so the new build's
+log was not seen; `data_*.csv` there are upstream's watch values, no link
+state. Redirecting candle-test output by hand left no file, so `307b9b9`
+adds `bin/selftest.cmd` (double click: four loopback load runs into
+`bin/selftest.txt`; checked under wine). Asked: selftest.txt on Windows,
+the same command on Linux with sudo (our libusb path, no drive: tells
+Windows from our protocol / the firmware), the new build's log.txt (first
+line `uCAN Monitor for Windows 307b9b9`), a trace with the drive, and
+whether Linux was tested with the very same adapter.
+
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
