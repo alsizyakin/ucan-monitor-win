@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstring>
 #include <format>
 
@@ -163,6 +164,20 @@ constexpr std::chrono::milliseconds flow_timeout{50};
 // adapter taking it; one that has not in this time is sent again
 constexpr std::chrono::milliseconds resend_timeout{10};
 constexpr unsigned max_resends = 2;
+// one frame in the adapter at a time, unless a frame has waited this long
+constexpr std::chrono::milliseconds widen_after{2};
+// Frames in the adapter not echoed, given up ones included, never more than
+// this: the adapter (64 buffers) stops taking frames for good once they run
+// out, as the Linux driver avoids by never having over 10 out. A frame given
+// up on stops counting after given_up_forget.
+constexpr size_t hard_limit = 8;
+constexpr std::chrono::seconds given_up_forget{2};
+
+canid_t id_of(const std::array<uint8_t, 20>& bytes) {
+    canid_t id;
+    std::memcpy(&id, bytes.data() + offsetof(HostFrame, can_id), sizeof(id));
+    return id;
+}
 // "no echo id" in the trace
 constexpr uint32_t no_echo_id = rx_echo_id;
 
@@ -788,11 +803,31 @@ Status GsUsbDevice::send(const can_frame& frame) {
 
 
 void GsUsbDevice::_drain_tx() {
-    // with _tx_mtx held: the queue goes into idle transfers, in order, while
-    // the adapter holds fewer than tx_in_flight frames not echoed yet
-    _check_in_adapter(Clock::now());
-    while (!_tx_idle.empty() && !_tx_queue.empty() && !_stopping && !_lost
-           && (_options.tx_in_flight == 0 || _in_adapter.size() < _options.tx_in_flight)) {
+    // with _tx_mtx held: the queue goes into idle transfers, in order. One
+    // frame is in the adapter at a time while sending keeps up; once the next
+    // has waited widen_after, up to tx_in_flight.
+    const auto now = Clock::now();
+    _check_in_adapter(now);
+    while (!_tx_idle.empty() && !_tx_queue.empty() && !_stopping && !_lost) {
+        if (_in_adapter.size() >= hard_limit) {
+            break;
+        }
+        const TxFrame& next = _tx_queue.front();
+        if (_options.tx_in_flight != 0) {
+            const size_t window = now - next.queued >= widen_after ? _options.tx_in_flight : 1;
+            const auto waiting = std::ranges::count_if(_in_adapter, [](const InAdapter& e) { return !e.given_up; });
+            if (static_cast<size_t>(waiting) >= window) {
+                break;
+            }
+        }
+        // a frame of the same id that may still be resent goes first, or the
+        // resend would land behind this one
+        const canid_t id = id_of(next.bytes);
+        if (std::ranges::any_of(_in_adapter, [id](const InAdapter& e) {
+                return !e.given_up && id_of(e.frame.bytes) == id;
+            })) {
+            break;
+        }
         TxSlot* slot = _tx_idle.back();
         _tx_idle.pop_back();
         const TxFrame frame = _tx_queue.front();
@@ -811,8 +846,16 @@ void GsUsbDevice::_drain_tx() {
 
 void GsUsbDevice::_check_in_adapter(Clock::time_point now) {
     // with _tx_mtx held
-    const bool resending = _options.resend && _options.tx_in_flight == 1;
+    const bool resending = _options.resend;
     for (auto it = _in_adapter.begin(); it != _in_adapter.end();) {
+        if (it->given_up) {
+            if (now - it->since >= given_up_forget) {
+                it = _in_adapter.erase(it); // lost after all, or its echo was
+                continue;
+            }
+            ++it;
+            continue;
+        }
         if (resending && it->taken && now - it->since >= resend_timeout) {
             if (it->resends < max_resends && !_tx_idle.empty() && !_stopping && !_lost) {
                 // the adapter took it and never passed it to the CAN controller
@@ -842,13 +885,15 @@ void GsUsbDevice::_check_in_adapter(Clock::time_point now) {
                 continue;
             }
             if (it->resends >= max_resends) {
-                it = _in_adapter.erase(it); // given up: it holds no place
+                it->given_up = true; // no place in the window, still under the limit
+                it->since = now;
+                ++it;
                 continue;
             }
         }
-        if (now - it->since >= flow_timeout) {
-            it = _in_adapter.erase(it); // its echo is lost or late: do not wait for it
-            continue;
+        if (!resending && now - it->since >= flow_timeout) {
+            it->given_up = true; // its echo is lost or late: do not wait for it
+            it->since = now;
         }
         ++it;
     }

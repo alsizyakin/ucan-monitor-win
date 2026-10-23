@@ -2,20 +2,23 @@
 //
 //   candle-test -l                  list the adapters on USB
 //   candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]
-//               [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]
+//               [-s 123#1122334455667788 [-p 1000] [-n 1] [-c]] [-w trace.csv]
 //               [-f 1] [-R 0|1] [-r 0|1] [-P]
 //
 // Opens the adapter, prints the frames and the bus errors received for -t
 // seconds (0: until Ctrl+C) and, with -s, sends a frame every -p ms (1000 by
 // default): the id in hex (over 7FF it goes as extended), then up to 8 data
-// bytes in hex. Below 100 ms the frames are not printed one by one, only a
-// summary each second.
+// bytes in hex; -n sends that many at once each period, in a burst, as the
+// GUI does, with ids counting up from the one given. Below 100 ms the frames
+// are not printed one by one, only a summary each second.
 //
 // -m listen: receive only, sending no acknowledgements or error flags.
 // -m loopback: a self-test; the adapter receives what it sends and nothing
 // reaches the bus.
 // -c: data bytes 0-3 carry a frame number; in loopback the numbers that come
-// back are checked for losses and order, and the round trip is timed.
+// back are checked: a frame not back in 100 ms is lost, one back before a
+// newer frame of its id is out of order, one back twice a duplicate; the
+// round trip is timed.
 // -w: write every frame sent, confirmed by the adapter and received to a CSV.
 // -f: at most this many frames in the adapter not reported sent (0: any);
 // -R: with -f 1, send again what the adapter lost; -r: RAW_IO for receiving
@@ -29,7 +32,8 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
-#include <deque>
+#include <map>
+#include <unordered_map>
 #include <format>
 #include <utility>
 #include <iostream>
@@ -44,7 +48,7 @@ std::atomic<bool> interrupted{false};
 void usage() {
     std::cerr << "usage: candle-test -l\n"
                  "       candle-test [-i candle0] [-b 250000] [-t 10] [-m normal|listen|loopback]\n"
-                 "                   [-s 123#1122334455667788 [-p 1000] [-c]] [-w trace.csv]\n"
+                 "                   [-s 123#1122334455667788 [-p 1000] [-n 1] [-c]] [-w trace.csv]\n"
                  "                   [-f 1] [-R 0|1] [-r 0|1] [-P]\n";
 }
 
@@ -155,6 +159,7 @@ int main(int argc, char** argv) {
     unsigned seconds = 10;
     std::optional<can_frame> tx_frame;
     unsigned period_ms = 1000;
+    unsigned burst = 1;
     bool numbered = false;
     can::detail::GsUsbDevice::Options options;
     options.error_frames = true;
@@ -205,6 +210,8 @@ int main(int argc, char** argv) {
                 options.pad_packets = true;
             } else if (arg == "-w" && has_value) {
                 options.trace_file = argv[++i];
+            } else if (arg == "-n" && has_value) {
+                burst = std::max(1u, static_cast<unsigned>(std::stoul(argv[++i])));
             } else if (arg == "-c") {
                 numbered = true;
             } else if (arg == "-s" && has_value) {
@@ -263,16 +270,34 @@ int main(int argc, char** argv) {
     unsigned sent = 0;
     unsigned send_errors = 0;
 
-    // numbered frames: the next number to send, the next expected back, and
-    // when each number in flight was sent
+    // numbered frames: the next number to send, when each one not back yet
+    // was sent, and the newest number back for each id
     uint32_t next_number = 0;
-    uint32_t expected_back = 0;
     unsigned came_back = 0;
-    unsigned lost = 0;
     unsigned out_of_order = 0;
-    std::deque<std::pair<uint32_t, Clock::time_point>> in_flight;
+    unsigned duplicates = 0;
+    std::unordered_map<uint32_t, Clock::time_point> sent_at;
+    std::map<canid_t, uint32_t> newest_back;
     std::chrono::microseconds max_round_trip{0};
     std::chrono::microseconds sum_round_trip{0};
+    const auto lost_by = [&](Clock::time_point t) {
+        return static_cast<unsigned>(std::ranges::count_if(sent_at, [t](const auto& entry) {
+            return t - entry.second > std::chrono::milliseconds(100);
+        }));
+    };
+    // the ids of a burst: the one given, then counting up
+    const auto burst_id = [&](unsigned k) {
+        const canid_t mask = (tx_frame->can_id & CAN_EFF_FLAG) ? CAN_EFF_MASK : CAN_SFF_MASK;
+        return (tx_frame->can_id & ~mask) | (((tx_frame->can_id & mask) + k) & mask);
+    };
+    const auto in_burst = [&](canid_t id) {
+        for (unsigned k = 0; k < burst; ++k) {
+            if (burst_id(k) == id) {
+                return true;
+            }
+        }
+        return false;
+    };
 
     const auto seconds_since_start = [&] { return std::chrono::duration<double>(Clock::now() - start).count(); };
 
@@ -287,31 +312,35 @@ int main(int argc, char** argv) {
             if (now - next_send > std::chrono::seconds(1)) {
                 next_send = now + period; // far behind: no burst to catch up
             }
-            can_frame frame = *tx_frame;
-            if (numbered) {
-                std::memcpy(frame.data, &next_number, sizeof(next_number));
-            }
-            if (dev.send(frame) == can::Status::ok) {
-                ++sent;
+            for (unsigned k = 0; k < burst; ++k) {
+                can_frame frame = *tx_frame;
+                frame.can_id = burst_id(k);
                 if (numbered) {
-                    in_flight.emplace_back(next_number, now);
+                    std::memcpy(frame.data, &next_number, sizeof(next_number));
                 }
-                if (!quiet) {
-                    print_frame("TX", seconds_since_start(), frame);
+                if (dev.send(frame) == can::Status::ok) {
+                    ++sent;
+                    if (numbered) {
+                        sent_at.emplace(next_number, now);
+                    }
+                    if (!quiet) {
+                        print_frame("TX", seconds_since_start(), frame);
+                    }
+                } else {
+                    ++send_errors;
+                    std::printf("%9.3f  TX  failed: the send queue is full or the adapter is gone\n",
+                                seconds_since_start());
                 }
-            } else {
-                ++send_errors;
-                std::printf("%9.3f  TX  failed: the send queue is full or the adapter is gone\n",
-                            seconds_since_start());
+                ++next_number;
             }
-            ++next_number;
         }
 
         if (quiet && now >= next_summary) {
             next_summary += std::chrono::seconds(1);
             std::printf("%9.3f  sent %u, received %u", seconds_since_start(), sent, received);
             if (numbered && options.loopback) {
-                std::printf(", came back %u, lost %u, out of order %u", came_back, lost, out_of_order);
+                std::printf(", came back %u, lost %u, out of order %u, duplicates %u",
+                            came_back, lost_by(now), out_of_order, duplicates);
             }
             std::printf("\n");
             std::fflush(stdout);
@@ -347,26 +376,27 @@ int main(int argc, char** argv) {
             print_frame("RX", t, frame);
         }
 
-        if (numbered && options.loopback && tx_frame && frame.can_id == tx_frame->can_id && frame.len >= 4) {
+        if (numbered && options.loopback && tx_frame && in_burst(frame.can_id) && frame.len >= 4) {
             uint32_t number;
             std::memcpy(&number, frame.data, sizeof(number));
+            const auto sent_it = sent_at.find(number);
+            if (sent_it == sent_at.end()) {
+                ++duplicates; // back already, or never sent
+                continue;
+            }
             ++came_back;
-            if (number == expected_back) {
-                ++expected_back;
-            } else if (number > expected_back) {
-                lost += number - expected_back;
-                expected_back = number + 1;
-            } else {
-                ++out_of_order;
-            }
-            while (!in_flight.empty() && in_flight.front().first < number) {
-                in_flight.pop_front();
-            }
-            if (!in_flight.empty() && in_flight.front().first == number) {
-                const auto trip = std::chrono::duration_cast<std::chrono::microseconds>(arrived - in_flight.front().second);
-                max_round_trip = std::max(max_round_trip, trip);
-                sum_round_trip += trip;
-                in_flight.pop_front();
+            const auto trip = std::chrono::duration_cast<std::chrono::microseconds>(arrived - sent_it->second);
+            max_round_trip = std::max(max_round_trip, trip);
+            sum_round_trip += trip;
+            sent_at.erase(sent_it);
+
+            const auto [newest, first] = newest_back.try_emplace(frame.can_id, number);
+            if (!first) {
+                if (number < newest->second) {
+                    ++out_of_order;
+                } else {
+                    newest->second = number;
+                }
             }
         }
     }
@@ -375,9 +405,9 @@ int main(int argc, char** argv) {
               << ", send errors " << send_errors << ".\n";
     if (numbered && options.loopback) {
         // frames still on their way when the time ran out are not lost
-        std::cout << std::format("Self-test: came back {} of {}, lost {}, out of order {}, "
+        std::cout << std::format("Self-test: came back {} of {}, lost {}, out of order {}, duplicates {}, "
                                  "round trip {:.2f} ms on average, {:.2f} ms at most.\n",
-                                 came_back, sent, lost, out_of_order,
+                                 came_back, sent, lost_by(Clock::now()), out_of_order, duplicates,
                                  came_back ? sum_round_trip.count() / 1000.0 / came_back : 0.0,
                                  max_round_trip.count() / 1000.0);
     }

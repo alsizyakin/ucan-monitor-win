@@ -46,12 +46,14 @@ public:
         std::filesystem::path trace_file;
         // at most this many frames in the adapter not yet reported sent; 0: no
         // limit. The Linux gs_usb driver keeps 10, but candleLight firmware of
-        // 2022 loses a frame that reaches it right behind another: 1 sends
-        // each frame only once the one before is reported sent.
-        unsigned tx_in_flight{1};
-        // with tx_in_flight 1: a frame the adapter took but did not report
-        // sent within 10 ms is sent again, at most twice; it never reached
-        // the CAN controller, so the counters in it stay in sequence
+        // 2022 loses a frame that reaches it right behind another. So one
+        // frame goes at a time while sending keeps up, and up to this many
+        // only when a frame has waited 2 ms.
+        unsigned tx_in_flight{4};
+        // a frame the adapter took but did not report sent within 10 ms is
+        // sent again, at most twice: it never reached the CAN controller.
+        // No frame goes while one with the same id is still unconfirmed, so a
+        // resend never lands behind a newer frame of its stream.
         bool resend{true};
         // Windows: let WinUSB pass the receive transfers straight to the USB
         // stack instead of queueing them one by one (RAW_IO, libusb 1.0.30)
@@ -179,6 +181,10 @@ private:
         Clock::time_point since; // submitted, or taken by the adapter
         bool taken{false};       // its USB transfer completed
         unsigned resends{0};
+        // not echoed for long, no longer resent nor counted in the window;
+        // still counted towards the hard limit, as it may be queued in the
+        // adapter (a frame waiting for the bus) rather than lost
+        bool given_up{false};
         TxFrame frame;
     };
     std::deque<InAdapter> _in_adapter; // under _tx_mtx
