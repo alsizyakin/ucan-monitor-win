@@ -232,6 +232,10 @@ else()
         RUNTIME DESTINATION bin
     )
 endif()
+if(WIN32)
+    # double-click load self-test of the adapter, writes bin/selftest.txt
+    install(FILES ${PROJECT_SOURCE_DIR}/win/tools/selftest.cmd DESTINATION bin)
+endif()
 install(DIRECTORY ${upstream_dir}/assets/
     DESTINATION assets
 )
