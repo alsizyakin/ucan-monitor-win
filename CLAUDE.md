@@ -185,6 +185,19 @@ artifacts of candleLight_fw's CI; flash with
 (candleLight, CANable-MKS 1.0, DSD TECH SH-C30A, FYSETC UCAN... all F072,
 different pins), and every colleague's adapter would need it.
 
+**2026-10-28, `logs/28_10_26/`** (97608d8). Owner: 10 ms clean for
+minutes; 1 ms one invalid frame in 3 min. Long run, 32 min (26 at 1 ms):
+~2900 sent / 10 s steady, dropped 0 throughout, queue 6-20 (max 56),
+resent 1-4 %, `late echoes` 0, `unconfirmed` 1-2 about 30 times (lost
+through both resends: the invalid frames); bus errors up to 1110 / 10 s,
+then none after ~22 min. Ended with "adapter is gone" as the laptop dimmed
+its screen; reopened, the adapter received nothing (needs a replug).
+Load self-test: one at a time 1868 frames/s, lossless; window 4 1565/s with
+70 unconfirmed; window 4 with resend under overload collapsed to 346/s
+(1925 resends, 473 late echoes). `56a9bfd`: tx_in_flight=1 default, 4
+resends, keep_awake (SetThreadExecutionState system+display while the
+event thread runs), replug hint in the log.
+
 **Reading them:**
 
 - no warnings or stops, no `CAN, last 10 s` lines: fixed. Rebase `async-send`
