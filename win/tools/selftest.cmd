@@ -5,7 +5,7 @@ rem the bus. Writes selftest.txt next to this file. Close ucan-monitor first.
 cd /d "%~dp0"
 echo Self-test of the adapter, about 1.5 minutes. Nothing goes to the bus.
 echo selftest %DATE% %TIME% > selftest.txt
-for %%o in ("" "-n 3" "-n 3 -f 1" "-n 3 -R 0") do (
+for %%o in ("" "-n 3" "-n 3 -f 4" "-R 0") do (
   echo.
   echo === settings: %%~o
   echo. >> selftest.txt

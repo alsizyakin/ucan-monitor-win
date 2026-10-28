@@ -163,7 +163,8 @@ constexpr std::chrono::milliseconds flow_timeout{50};
 // sent one at a time, a frame comes back as an echo within 1.2 ms of the
 // adapter taking it; one that has not in this time is sent again
 constexpr std::chrono::milliseconds resend_timeout{10};
-constexpr unsigned max_resends = 2;
+// losses come in bunches: 2 resends still lost a frame now and then
+constexpr unsigned max_resends = 4;
 // one frame in the adapter at a time, unless a frame has waited this long
 constexpr std::chrono::milliseconds widen_after{2};
 // Frames in the adapter not echoed, given up ones included, never more than
@@ -597,6 +598,11 @@ Status GsUsbDevice::_start(uint32_t bitrate) {
         return Status::socketcan_init_failed;
     }
     _event_thread = std::thread(&GsUsbDevice::_run_events, this);
+#ifdef _WIN32
+    if (_options.keep_awake) {
+        bsclog::info("candleLight: keeping Windows and the display awake while connected.");
+    }
+#endif
 
 #ifdef _WIN32
     // Waits for a frame are 1 ms, as with SocketCAN; the default Windows
@@ -641,6 +647,12 @@ GsUsbDevice::~GsUsbDevice() {
 
 void GsUsbDevice::_run_events() {
     // All transfer callbacks run here: nothing else handles libusb events.
+#ifdef _WIN32
+    // held while this thread runs, that is while the adapter is open
+    if (_options.keep_awake) {
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+    }
+#endif
     while (_rx_active > 0 || _tx_active > 0) {
         if (_stopping) {
             // repeated each turn: a transfer may be resubmitted after a cancel
@@ -658,6 +670,11 @@ void GsUsbDevice::_run_events() {
         std::lock_guard<std::mutex> lock(_tx_mtx);
         _drain_tx();
     }
+#ifdef _WIN32
+    if (_options.keep_awake) {
+        SetThreadExecutionState(ES_CONTINUOUS);
+    }
+#endif
 }
 
 
@@ -753,7 +770,8 @@ void GsUsbDevice::_on_rx(libusb_transfer* transfer) {
 
 void GsUsbDevice::_mark_lost() {
     if (!_lost.exchange(true)) {
-        bsclog::error("candleLight: the adapter is gone (unplugged?).");
+        bsclog::error("candleLight: the adapter is gone: unplugged, or Windows put its USB to sleep. "
+                      "Replug the adapter and connect again.");
     }
     _queue_cv.notify_all();
 }

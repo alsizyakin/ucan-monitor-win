@@ -22,9 +22,9 @@ const std::filesystem::path settings_file = "cansocket.cfg";
 const std::filesystem::path trace_flag = "cantrace.on";
 
 // Optional settings of the adapter link, one per line, as in candle-test:
-//   tx_in_flight=4    frames in the adapter not reported sent, at most (0: any);
-//                     one at a time while sending keeps up
+//   tx_in_flight=1    frames in the adapter not reported sent, at most (0: any)
 //   resend=1          send again what the adapter lost
+//   keep_awake=1      keep Windows and the display awake while connected
 //   raw_io=1          RAW_IO for receiving on Windows
 //   pad_packets=0     the adapter pads its packets
 const std::filesystem::path options_file = "candle.cfg";
@@ -51,6 +51,8 @@ void read_options(detail::GsUsbDevice::Options& options) {
             options.resend = value != 0;
         } else if (key == "raw_io") {
             options.raw_io = value != 0;
+        } else if (key == "keep_awake") {
+            options.keep_awake = value != 0;
         } else if (key == "pad_packets") {
             options.pad_packets = value != 0;
         } else {

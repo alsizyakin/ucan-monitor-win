@@ -46,10 +46,11 @@ public:
         std::filesystem::path trace_file;
         // at most this many frames in the adapter not yet reported sent; 0: no
         // limit. The Linux gs_usb driver keeps 10, but candleLight firmware of
-        // 2022 loses a frame that reaches it right behind another. So one
-        // frame goes at a time while sending keeps up, and up to this many
-        // only when a frame has waited 2 ms.
-        unsigned tx_in_flight{4};
+        // 2022 loses a frame that reaches it right behind another, and on
+        // Windows more in flight is no faster (1900 frames/s one at a time,
+        // 1600 with 4). Above 1, one frame goes at a time while sending keeps
+        // up, and up to this many once a frame has waited 2 ms.
+        unsigned tx_in_flight{1};
         // a frame the adapter took but did not report sent within 10 ms is
         // sent again, at most twice: it never reached the CAN controller.
         // No frame goes while one with the same id is still unconfirmed, so a
@@ -61,6 +62,10 @@ public:
         // have the adapter pad every frame to the endpoint's packet size;
         // the candleLight authors found it helps with WinUSB
         bool pad_packets{false};
+        // Windows: while the adapter is open, keep the system and the display
+        // awake. A laptop that dims its screen and saves power cuts the
+        // adapter's USB, and the adapter then needs replugging.
+        bool keep_awake{true};
     };
 
     // Descriptions of the gs_usb adapters on USB, in the order open() counts them.
