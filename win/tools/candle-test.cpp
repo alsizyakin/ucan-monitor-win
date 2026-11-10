@@ -20,8 +20,8 @@
 // newer frame of its id is out of order, one back twice a duplicate; the
 // round trip is timed.
 // -w: write every frame sent, confirmed by the adapter and received to a CSV.
-// -f: at most this many frames in the adapter not reported sent (0: any);
-// -R: with -f 1, send again what the adapter lost; -r: RAW_IO for receiving
+// -f: at most this many frames in the adapter not reported sent (0: hard cap 8);
+// -R: legacy option, resending is disabled; -r: RAW_IO for receiving
 // on Windows; -P: the adapter pads its packets.
 
 #include "../src/cansocket/gs_usb_device.h"
@@ -269,6 +269,7 @@ int main(int argc, char** argv) {
     double last_error_printed = -1;
     unsigned sent = 0;
     unsigned send_errors = 0;
+    unsigned skipped_periods = 0;
 
     // numbered frames: the next number to send, when each one not back yet
     // was sent, and the newest number back for each id
@@ -303,14 +304,20 @@ int main(int argc, char** argv) {
 
     while (!interrupted && dev.good()) {
         const auto now = Clock::now();
-        if (seconds != 0 && now - start >= std::chrono::seconds(seconds)) {
-            break;
+        const bool draining = seconds != 0 && now - start >= std::chrono::seconds(seconds);
+        if (draining) {
+            // Stop generating, then allow the final queued frames to return.
+            if (!numbered || !options.loopback || sent_at.empty()
+                    || now - start >= std::chrono::seconds(seconds + 1)) {
+                break;
+            }
         }
 
-        if (tx_frame && now >= next_send) {
+        if (!draining && tx_frame && now >= next_send) {
             next_send += period;
-            if (now - next_send > std::chrono::seconds(1)) {
-                next_send = now + period; // far behind: no burst to catch up
+            if (next_send <= now) {
+                skipped_periods += static_cast<unsigned>((now - next_send) / period + 1);
+                next_send = now + period; // no catch-up bursts after scheduler delays
             }
             for (unsigned k = 0; k < burst; ++k) {
                 can_frame frame = *tx_frame;
@@ -328,8 +335,10 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     ++send_errors;
-                    std::printf("%9.3f  TX  failed: the send queue is full or the adapter is gone\n",
-                                seconds_since_start());
+                    if (send_errors == 1 || !quiet) {
+                        std::printf("%9.3f  TX failed; further failures are counted in the summary\n",
+                                    seconds_since_start());
+                    }
                 }
                 ++next_number;
             }
@@ -347,7 +356,7 @@ int main(int argc, char** argv) {
         }
 
         auto wait = std::chrono::milliseconds(100);
-        if (tx_frame) {
+        if (tx_frame && !draining) {
             wait = std::clamp(std::chrono::duration_cast<std::chrono::milliseconds>(next_send - Clock::now()),
                               std::chrono::milliseconds(0), wait);
         }
@@ -402,12 +411,12 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Received " << received << " frames and " << errors << " error frames, sent " << sent
-              << ", send errors " << send_errors << ".\n";
+              << ", send errors " << send_errors << ", skipped periods " << skipped_periods << ".\n";
     if (numbered && options.loopback) {
-        // frames still on their way when the time ran out are not lost
+        // A one-second drain above separates final in-flight frames from loss.
         std::cout << std::format("Self-test: came back {} of {}, lost {}, out of order {}, duplicates {}, "
                                  "round trip {:.2f} ms on average, {:.2f} ms at most.\n",
-                                 came_back, sent, lost_by(Clock::now()), out_of_order, duplicates,
+                                 came_back, sent, sent_at.size(), out_of_order, duplicates,
                                  came_back ? sum_round_trip.count() / 1000.0 / came_back : 0.0,
                                  max_round_trip.count() / 1000.0);
     }
@@ -420,5 +429,8 @@ int main(int argc, char** argv) {
                              stats.last_send_error.empty() ? "" : " (" + stats.last_send_error + ")",
                              stats.send_dropped, stats.max_send_time.count() / 1000.0, stats.max_send_queue,
                              stats.received, stats.receive_dropped, stats.adapter_overflows, stats.bus_errors);
-    return dev.good() ? 0 : 1;
+    const bool selftest_failed = numbered && options.loopback
+            && (came_back != sent || out_of_order || duplicates || send_errors
+                || stats.send_failed || stats.send_dropped || stats.receive_dropped || stats.adapter_overflows);
+    return dev.good() && !selftest_failed ? 0 : 1;
 }

@@ -87,6 +87,7 @@ private:
         uint64_t bus_errors{0};
     };
     Diagnostics _diag;
+    unsigned _recv_batch{0}; // under _recv_mtx; yield to the client's send/stop loop
     void _report(bool final);
 
     std::mutex _send_mtx;

@@ -22,8 +22,8 @@ const std::filesystem::path settings_file = "cansocket.cfg";
 const std::filesystem::path trace_flag = "cantrace.on";
 
 // Optional settings of the adapter link, one per line, as in candle-test:
-//   tx_in_flight=1    frames in the adapter not reported sent, at most (0: any)
-//   resend=1          send again what the adapter lost
+//   tx_in_flight=1    frames in the adapter not reported sent, at most (0: hard limit 8)
+//   resend=0          legacy option; retransmission is always disabled
 //   keep_awake=1      keep Windows and the display awake while connected
 //   raw_io=1          RAW_IO for receiving on Windows
 //   pad_packets=0     the adapter pads its packets
@@ -140,6 +140,7 @@ Status Socket::connect(const std::string& interface, const std::string& bitrate)
     _device = std::move(*device);
     _connected = true;
     _diag = Diagnostics{};
+    _recv_batch = 0;
     _diag.period_start = std::chrono::steady_clock::now();
     bsclog::success("Opened {} at {} bit/s.", interface, bitrate);
 
@@ -196,7 +197,14 @@ Status Socket::recv(can_frame& frame) {
         _report(false);
     }
 
+    // The upstream client drains recv() until it times out. Continuous RX
+    // must not starve its periodic sends or its shutdown check.
+    if (_recv_batch >= 64) {
+        _recv_batch = 0;
+        return Status::recv_timeout;
+    }
     const Status status = _device->recv(frame, _recv_timeout);
+    _recv_batch = status == Status::ok ? _recv_batch + 1 : 0;
     if (!_device->good()) {
         _connected = false;
     }
@@ -225,9 +233,8 @@ void Socket::_report(bool final) {
                       || stats.adapter_overflows > 0 || stats.max_send_time >= slow_send
                       || _diag.max_pause >= long_pause;
     if (trouble) {
-        // resent: the adapter lost it, sent again; unconfirmed: taken by the
-        // adapter over USB, but never reported sent; late echoes: a frame
-        // reported sent twice, so on the bus twice
+        // An absent/late echo does not identify where a frame was delayed or
+        // whether it reached the bus. Keep the legacy counters for log tools.
         bsclog::warning("CAN, last {} s: sent {}, resent {}, unconfirmed by the adapter {}, late echoes {}, "
                         "failed {}{}, dropped {}, longest send {:.1f} ms, longest send queue {}; received {}, "
                         "dropped {}, adapter overflows {}, bus errors {}; "

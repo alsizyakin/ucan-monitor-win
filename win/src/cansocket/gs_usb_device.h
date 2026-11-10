@@ -44,18 +44,12 @@ public:
         // write every frame sent, confirmed by the adapter and received, and
         // the bus errors, to this CSV file; empty: no trace
         std::filesystem::path trace_file;
-        // at most this many frames in the adapter not yet reported sent; 0: no
-        // limit. The Linux gs_usb driver keeps 10, but candleLight firmware of
-        // 2022 loses a frame that reaches it right behind another, and on
-        // Windows more in flight is no faster (1900 frames/s one at a time,
-        // 1600 with 4). Above 1, one frame goes at a time while sending keeps
-        // up, and up to this many once a frame has waited 2 ms.
+        // Unconfirmed frames, including USB transfers still in progress.
+        // Zero selects the hard limit (8), never an unlimited window.
         unsigned tx_in_flight{1};
-        // a frame the adapter took but did not report sent within 10 ms is
-        // sent again, at most twice: it never reached the CAN controller.
-        // No frame goes while one with the same id is still unconfirmed, so a
-        // resend never lands behind a newer frame of its stream.
-        bool resend{true};
+        // Kept for old candle.cfg and command lines. Retransmission is disabled:
+        // a missing echo cannot establish whether a frame reached the bus.
+        bool resend{false};
         // Windows: let WinUSB pass the receive transfers straight to the USB
         // stack instead of queueing them one by one (RAW_IO, libusb 1.0.30)
         bool raw_io{true};
@@ -87,7 +81,7 @@ public:
     // Waits up to timeout for a frame received from the bus.
     Status recv(can_frame& frame, std::chrono::milliseconds timeout);
 
-    // False once the adapter is gone (unplugged).
+    // False after a USB failure, stalled confirmation or stale transmit queue.
     bool good() const { return !_lost; }
 
     // What happened to the frames since the last call.
@@ -95,8 +89,8 @@ public:
         uint64_t sent{0};          // taken by the adapter over USB
         uint64_t confirmed{0};     // reported by the adapter as sent on the bus
         uint64_t unconfirmed{0};   // taken, but not reported sent within 1 s
-        uint64_t resent{0};        // sent again, not reported sent in 10 ms
-        uint64_t late_echoes{0};   // reported sent once more: a frame on the bus twice
+        uint64_t resent{0};        // sent again, legacy counter, now always zero
+        uint64_t late_echoes{0};   // duplicate or late/unknown echo; not proof of duplicate CAN delivery
         uint64_t send_failed{0};   // lost in a failed USB transfer
         uint64_t send_dropped{0};  // refused: the send queue was full
         std::string last_send_error;
@@ -131,11 +125,14 @@ private:
         uint32_t echo_id{0};
         Clock::time_point queued;
         bool confirmed{false};
-        bool failed{false}; // never reached the adapter: nothing to wait for
+        bool failed{false}; // transfer failed; delivery may be ambiguous
         can_frame frame{};
     };
 
-    GsUsbDevice() = default;
+    friend struct GsUsbDeviceTest;
+    GsUsbDevice();
+    int (*_submit_transfer)(libusb_transfer*);
+    void _fault(const std::string& reason); // called with _tx_mtx held
     Status _start(uint32_t bitrate);
     void _on_rx(libusb_transfer* transfer);
     void _on_tx(TxSlot* slot);
@@ -144,7 +141,7 @@ private:
     void _expire_echoes(Clock::time_point now);
     void _mark_failed(uint32_t echo_id);
     void _trace(char event, uint32_t echo_id, const can_frame& frame);
-    bool _submit_tx(TxSlot* slot, const TxFrame& frame, bool track = true);
+    bool _submit_tx(TxSlot* slot, const TxFrame& frame);
     void _check_in_adapter(Clock::time_point now);
     void _mark_lost();
     void _run_events();
@@ -180,17 +177,11 @@ private:
     std::atomic<int> _tx_active{0};
 
     uint32_t _next_echo_id{0}; // under _tx_mtx
-    // a frame in the adapter not yet echoed, for tx_in_flight and resending
+    // A USB success or elapsed time does not release an adapter credit.
+    // Only a matching CAN echo does; ambiguity stops this connection.
     struct InAdapter {
         uint32_t echo_id{0};
-        Clock::time_point since; // submitted, or taken by the adapter
-        bool taken{false};       // its USB transfer completed
-        unsigned resends{0};
-        // not echoed for long, no longer resent nor counted in the window;
-        // still counted towards the hard limit, as it may be queued in the
-        // adapter (a frame waiting for the bus) rather than lost
-        bool given_up{false};
-        TxFrame frame;
+        Clock::time_point since;
     };
     std::deque<InAdapter> _in_adapter; // under _tx_mtx
 

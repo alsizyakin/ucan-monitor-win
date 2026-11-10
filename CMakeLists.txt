@@ -203,6 +203,11 @@ add_executable(bittiming_test
 target_link_libraries(bittiming_test PRIVATE common_options)
 add_test(NAME bittiming COMMAND bittiming_test)
 
+add_executable(transport_test ${PROJECT_SOURCE_DIR}/win/tests/transport_test.cpp)
+target_link_libraries(transport_test PRIVATE candle)
+add_test(NAME transport COMMAND transport_test)
+set_tests_properties(transport PROPERTIES TIMEOUT 30)
+
 ################################################################################
 # Misc Options
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

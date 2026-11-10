@@ -1,19 +1,16 @@
 @echo off
-rem Load self-test of the candleLight adapter in four settings: numbered
-rem frames at 1000 a second, looped back inside the adapter, nothing goes to
-rem the bus. Writes selftest.txt next to this file. Close ucan-monitor first.
+setlocal
+rem Loopback only: no traffic is sent onto the CAN bus.
 cd /d "%~dp0"
-echo Self-test of the adapter, about 1.5 minutes. Nothing goes to the bus.
+set "duration=60"
+if not "%~1"=="" set "duration=%~1"
+echo Close ucan-monitor before testing. Nothing goes to the bus.
+echo Duration: %duration% seconds. For a soak test: selftest.cmd 1800
 echo selftest %DATE% %TIME% > selftest.txt
-for %%o in ("" "-n 3" "-n 3 -f 4" "-R 0") do (
-  echo.
-  echo === settings: %%~o
-  echo. >> selftest.txt
-  echo === settings: %%~o >> selftest.txt
-  candle-test.exe -m loopback -b 500000 -s 123#0000000000000000 -c -p 1 -t 20 %%~o >> selftest.txt 2>&1
-)
-echo.
+candle-test.exe -m loopback -b 500000 -s 123#0000000000000000 -c -p 1 -t %duration% >> selftest.txt 2>&1
+set "result=%ERRORLEVEL%"
+echo Exit code: %result% >> selftest.txt
 type selftest.txt
-echo.
 echo Saved to %CD%\selftest.txt
 pause
+exit /b %result%
