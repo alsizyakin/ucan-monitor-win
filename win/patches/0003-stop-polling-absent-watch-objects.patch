@@ -1,0 +1,47 @@
+Watch: stop polling objects explicitly absent from the device
+
+An object-not-found abort disables only that Watch checkbox. Temporary
+errors and configuration access do not change polling. No dictionary edits.
+
+diff --git a/src/ucanopen/server/services/watch/server_watch_service.cpp b/src/ucanopen/server/services/watch/server_watch_service.cpp
+index f941b6a..ea1d1fb 100644
+--- a/src/ucanopen/server/services/watch/server_watch_service.cpp
++++ b/src/ucanopen/server/services/watch/server_watch_service.cpp
+@@ -47,6 +47,37 @@ FrameHandlingStatus ServerWatchService::handle_sdo(ODEntryIter entry,
+                                                    ExpeditedSdoData sdo_data) {
+     const auto& [key, object] = *entry;
+
++    // A permanent negative capability reply must not be polled forever.
++    // Keep the dictionary intact: the user can retry via the Watch checkbox.
++    if (object.category == _server.dictionary().config.watch_category
++            && sdo_type == SdoType::abort
++            && sdo_data.u32() == std::to_underlying(SdoAbortCode::object_not_found)) {
++        bool was_enabled = false;
++        {
++            std::unique_lock lock(_objects_mtx);
++            for (size_t i = 0; i < _objects.size(); ++i) {
++                if (_objects[i] == &object) {
++                    was_enabled = _object_daq_enabled[i];
++                    _object_daq_enabled[i] = false;
++                    break;
++                }
++            }
++        }
++        {
++            std::lock_guard lock(_data_mtx);
++            auto data = _data.find(WatchKey{object.subcategory, object.name});
++            if (data != _data.end()) {
++                data->second.str = "не поддерживается";
++            }
++        }
++        if (was_enabled) {
++            bsclog::warning("Disabled Watch polling of {}::{}::{}: device reports object not found; "
++                            "enable its Watch checkbox to retry.",
++                            _server.name(), object.subcategory, object.name);
++        }
++        return FrameHandlingStatus::success;
++    }
++
+     if ((object.category == _server.dictionary().config.watch_category) &&
+         (sdo_type == SdoType::response_to_read)) {
+         WatchKey watch_key{object.subcategory, object.name};

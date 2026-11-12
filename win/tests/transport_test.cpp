@@ -146,14 +146,26 @@ struct GsUsbDeviceTest {
         require(dev->_tx_active == 0, "failed submission is not active");
     }
 
-    static void stale_queue() {
+    static void transient_congestion() {
         auto dev = device();
         dev->send(frame());
-        complete(*dev, submitted.back());
+        auto* first = submitted.back();
+        const auto id = echo_id(first);
+        complete(*dev, first);
         dev->send(frame(1));
-        dev->_tx_queue.front().queued -= std::chrono::milliseconds(101);
+        dev->_tx_queue.front().queued -= std::chrono::milliseconds(119);
         dev->_drain_tx();
-        require(!dev->good() && submitted.size() == 1, "old commands are never replayed after congestion");
+        require(dev->good() && submitted.size() == 1, "119 ms pause keeps connection and preserves the CAN credit");
+        dev->_drain_tx();
+        require(dev->take_stats().slow_queue_events == 1, "one diagnostic per congestion episode");
+        dev->_on_echo(id, Clock::now());
+        require(submitted.size() == 2 && dev->good(), "late CAN confirmation resumes FIFO without reconnect");
+        auto* second = submitted.back();
+        const auto next_id = echo_id(second);
+        complete(*dev, second);
+        dev->_on_echo(next_id, Clock::now());
+        require(dev->_tx_queue.empty() && dev->_in_adapter.empty(), "recovered queue drains completely");
+        require(dev->take_stats().send_dropped == 0, "transient congestion drops no commands");
     }
 
     static void queue_bound() {
@@ -171,7 +183,7 @@ struct GsUsbDeviceTest {
         missing_echo(0);
         missing_echo(100);
         failed_usb();
-        stale_queue();
+        transient_congestion();
         queue_bound();
     }
 };

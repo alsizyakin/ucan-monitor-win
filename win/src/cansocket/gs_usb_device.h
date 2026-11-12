@@ -93,9 +93,12 @@ public:
         uint64_t late_echoes{0};   // duplicate or late/unknown echo; not proof of duplicate CAN delivery
         uint64_t send_failed{0};   // lost in a failed USB transfer
         uint64_t send_dropped{0};  // refused: the send queue was full
+        uint64_t slow_queue_events{0}; // queue crossed 100 ms; connection retained
         std::string last_send_error;
         size_t max_send_queue{0};  // frames waiting for a USB transfer, at most
         std::chrono::microseconds max_send_time{0}; // from send() to the adapter taking it
+        std::chrono::microseconds max_usb_time{0}; // submission to USB completion
+        std::chrono::microseconds max_echo_time{0}; // submission to CAN echo
         uint64_t received{0};
         uint64_t receive_dropped{0};  // the receive queue was full
         uint64_t adapter_overflows{0}; // frames flagged: the adapter dropped some before
@@ -116,6 +119,7 @@ private:
         GsUsbDevice* device{nullptr};
         libusb_transfer* transfer{nullptr};
         TxFrame frame;
+        Clock::time_point submitted;
     };
 
     // A frame sent, until the adapter reports it sent on the bus (its echo,
@@ -172,6 +176,7 @@ private:
 
     std::mutex _tx_mtx;
     std::deque<TxFrame> _tx_queue;
+    bool _queue_slow{false}; // under _tx_mtx; one warning count per congestion episode
     std::vector<std::unique_ptr<TxSlot>> _tx_slots;
     std::vector<TxSlot*> _tx_idle;
     std::atomic<int> _tx_active{0};

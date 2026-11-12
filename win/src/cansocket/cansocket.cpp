@@ -122,6 +122,9 @@ Status Socket::connect(const std::string& interface, const std::string& bitrate)
     std::lock_guard<std::mutex> lock2(_recv_mtx);
 
     _connected = false;
+    if (_device) {
+        _report(true); // preserve the previous connection's totals on reconnect
+    }
     _device.reset();
 
     bsclog::info("Opening {} at {} bit/s...", interface, bitrate);
@@ -142,6 +145,7 @@ Status Socket::connect(const std::string& interface, const std::string& bitrate)
     _diag = Diagnostics{};
     _recv_batch = 0;
     _diag.period_start = std::chrono::steady_clock::now();
+    _connection_start = _diag.period_start;
     bsclog::success("Opened {} at {} bit/s.", interface, bitrate);
 
     std::ofstream(settings_file) << interface << ' ' << bitrate << '\n';
@@ -231,6 +235,7 @@ void Socket::_report(bool final) {
                       || stats.send_failed > 0 || stats.send_dropped > 0
                       || stats.receive_dropped > 0 || stats.bus_errors > 0
                       || stats.adapter_overflows > 0 || stats.max_send_time >= slow_send
+                      || stats.slow_queue_events > 0
                       || _diag.max_pause >= long_pause;
     if (trouble) {
         // An absent/late echo does not identify where a frame was delayed or
@@ -238,14 +243,18 @@ void Socket::_report(bool final) {
         bsclog::warning("CAN, last {} s: sent {}, resent {}, unconfirmed by the adapter {}, late echoes {}, "
                         "failed {}{}, dropped {}, longest send {:.1f} ms, longest send queue {}; received {}, "
                         "dropped {}, adapter overflows {}, bus errors {}; "
-                        "longest pause of the uCANopen thread {:.1f} ms.",
+                        "longest pause of the uCANopen thread {:.1f} ms; "
+                        "confirmed {}, slow queue episodes {}, longest USB transfer {:.1f} ms, "
+                        "longest CAN echo {:.1f} ms, connection age {:.3f} s.",
                         std::chrono::duration_cast<std::chrono::seconds>(
                                 std::chrono::steady_clock::now() - _diag.period_start).count(),
                         stats.sent, stats.resent, stats.unconfirmed, stats.late_echoes, stats.send_failed,
                         stats.last_send_error.empty() ? "" : " (" + stats.last_send_error + ")",
                         stats.send_dropped, ms(stats.max_send_time), stats.max_send_queue,
                         stats.received, stats.receive_dropped, stats.adapter_overflows, stats.bus_errors,
-                        ms(_diag.max_pause));
+                        ms(_diag.max_pause), stats.confirmed, stats.slow_queue_events,
+                        ms(stats.max_usb_time), ms(stats.max_echo_time),
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - _connection_start).count());
     }
     if (final) {
         bsclog::info("CAN in this connection: sent {}, resent {}, unconfirmed by the adapter {}, late echoes {}, "

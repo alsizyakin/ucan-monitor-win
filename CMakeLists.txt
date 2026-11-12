@@ -208,6 +208,21 @@ target_link_libraries(transport_test PRIVATE candle)
 add_test(NAME transport COMMAND transport_test)
 set_tests_properties(transport PROPERTIES TIMEOUT 30)
 
+add_executable(watch_abort_test
+    ${PROJECT_SOURCE_DIR}/win/tests/watch_abort_test.cpp
+    ${upstream_dir}/src/ucanopen/server/services/watch/server_watch_service.cpp
+    ${upstream_dir}/src/ucanopen/server/services/sdo/server_sdo_service.cpp
+    ${upstream_dir}/src/ucanopen/server/impl/impl_server.cpp
+)
+target_include_directories(watch_abort_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/win/include
+    ${upstream_dir}/src
+)
+target_link_libraries(watch_abort_test PRIVATE candle)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/watch-test)
+add_test(NAME watch_abort COMMAND watch_abort_test)
+set_tests_properties(watch_abort PROPERTIES TIMEOUT 30 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/watch-test)
+
 ################################################################################
 # Misc Options
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

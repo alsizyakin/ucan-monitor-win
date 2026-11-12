@@ -160,7 +160,7 @@ constexpr std::chrono::seconds echo_timeout{1};
 // Never recycle a credit on a timer or resend an ambiguous CAN command.
 constexpr size_t hard_limit = 8;
 constexpr unsigned tx_timeout_ms = 1000;
-constexpr std::chrono::milliseconds max_queue_age{100};
+constexpr std::chrono::milliseconds slow_queue_age{100};
 
 // "no echo id" in the trace
 constexpr uint32_t no_echo_id = rx_echo_id;
@@ -823,9 +823,15 @@ void GsUsbDevice::_drain_tx() {
     // The adapter window counts all submitted frames until their CAN echo.
     const auto now = Clock::now();
     _check_in_adapter(now);
-    if (!_lost && !_tx_queue.empty() && now - _tx_queue.front().queued >= max_queue_age) {
-        _fault("transmit queue exceeded 100 ms; reduce polling load before reconnecting");
+    // Queue age is a latency diagnostic, not evidence of a broken transport.
+    // Windows can pause USB for >100 ms and then resume with every frame intact.
+    // Keep FIFO and adapter credits; only the USB/echo watchdogs fault the link.
+    const bool slow = !_tx_queue.empty() && now - _tx_queue.front().queued >= slow_queue_age;
+    if (slow && !_queue_slow) {
+        std::lock_guard<std::mutex> lock(_stats_mtx);
+        ++_stats.slow_queue_events;
     }
+    _queue_slow = slow;
     while (!_tx_idle.empty() && !_tx_queue.empty() && !_stopping && !_lost) {
         const size_t window = _options.tx_in_flight == 0
                 ? hard_limit : std::min<size_t>(_options.tx_in_flight, hard_limit);
@@ -882,6 +888,7 @@ void GsUsbDevice::_fault(const std::string& reason) {
 bool GsUsbDevice::_submit_tx(TxSlot* slot, const TxFrame& frame) {
     // with _tx_mtx held
     slot->frame = frame;
+    slot->submitted = Clock::now();
     const int result = _submit_transfer(slot->transfer);
     if (result != 0) {
         {
@@ -895,7 +902,7 @@ bool GsUsbDevice::_submit_tx(TxSlot* slot, const TxFrame& frame) {
     ++_tx_active;
     uint32_t echo_id;
     std::memcpy(&echo_id, frame.bytes.data(), sizeof(echo_id));
-    _in_adapter.push_back(InAdapter{.echo_id = echo_id, .since = Clock::now()});
+    _in_adapter.push_back(InAdapter{.echo_id = echo_id, .since = slot->submitted});
     return true;
 }
 
@@ -908,6 +915,8 @@ void GsUsbDevice::_on_tx(TxSlot* slot) {
         std::lock_guard<std::mutex> lock(_stats_mtx);
         ++_stats.sent;
         _stats.max_send_time = std::max(_stats.max_send_time, time);
+        _stats.max_usb_time = std::max(_stats.max_usb_time,
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - slot->submitted));
     } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
         {
             std::lock_guard<std::mutex> lock(_stats_mtx);
@@ -941,6 +950,12 @@ void GsUsbDevice::_on_echo(uint32_t echo_id, Clock::time_point now) {
     {
         // the frame has left the adapter: room for the next
         std::lock_guard<std::mutex> lock(_tx_mtx);
+        const auto entry = std::ranges::find(_in_adapter, echo_id, &InAdapter::echo_id);
+        if (entry != _in_adapter.end()) {
+            std::lock_guard<std::mutex> stats_lock(_stats_mtx);
+            _stats.max_echo_time = std::max(_stats.max_echo_time,
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - entry->since));
+        }
         std::erase_if(_in_adapter, [echo_id](const InAdapter& entry) { return entry.echo_id == echo_id; });
         _drain_tx();
     }
